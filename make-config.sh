@@ -297,6 +297,9 @@ case `uname` in
     Darwin)
         sbcl_os="darwin"
         ;;
+    Lambda)
+        sbcl_os="netbsd"
+        ;;
     SunOS)
         sbcl_os="sunos"
         ;;

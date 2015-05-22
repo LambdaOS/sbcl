@@ -20,6 +20,10 @@
 #include "machine/npx.h"
 #endif
 
+#if defined(LISP_FEATURE_NETBSD)
+#include <sys/lwp.h>
+#endif
+
 #if defined(LISP_FEATURE_OPENBSD)
 #include <machine/npx.h>
 #include <stddef.h>
@@ -182,11 +186,20 @@ int arch_os_thread_init(struct thread *thread) {
     set_data_desc_addr(&ldt_entry, thread);
     set_data_desc_size(&ldt_entry, dynamic_values_bytes);
 
+#ifdef LISP_FEATURE_NETBSD
+    n = x86_set_ldt(curlwp, (union descriptor*) &ldt_entry, 1);
+    if (n < 0) {
+        perror("x86_set_ldt");
+        lose("unexpected x86_set_ldt(..) failure\n");
+    }
+#else
     n = i386_set_ldt(LDT_AUTO_ALLOC, (union descriptor*) &ldt_entry, 1);
     if (n < 0) {
         perror("i386_set_ldt");
         lose("unexpected i386_set_ldt(..) failure\n");
     }
+#endif
+
     FSHOW_SIGNAL((stderr, "/ TLS: Allocated LDT %x\n", n));
     thread->tls_cookie=n;
     arch_os_load_ldt(thread);
