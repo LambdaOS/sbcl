@@ -186,7 +186,7 @@
   (:errors   . 0)
   (:timeouts . 0))
 
-#-win32
+#-(or win32 freebsd)
 (deftest mailbox.multiple-producers-single-consumer
     (test-mailbox-producers-consumers :n-senders 10
                                       :n-receivers 1
