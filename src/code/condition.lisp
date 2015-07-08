@@ -86,30 +86,12 @@
 ;;; figured out whether it's right. -- WHN 19990612
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (/show0 "condition.lisp 103")
-  (let ((condition-class (locally
-                           ;; KLUDGE: There's a DEFTRANSFORM
-                           ;; FIND-CLASSOID for constant class names
-                           ;; which creates fast but
-                           ;; non-cold-loadable, non-compact code. In
-                           ;; this context, we'd rather have compact,
-                           ;; cold-loadable code. -- WHN 19990928
-                           (declare (notinline find-classoid))
-                           (find-classoid 'condition))))
+  (let ((condition-class (find-classoid 'condition)))
     (setf (condition-classoid-cpl condition-class)
           (list condition-class)))
   (/show0 "condition.lisp 103"))
 
-(setf (condition-classoid-report (locally
-                                   ;; KLUDGE: There's a DEFTRANSFORM
-                                   ;; FIND-CLASSOID for constant class
-                                   ;; names which creates fast but
-                                   ;; non-cold-loadable, non-compact
-                                   ;; code. In this context, we'd
-                                   ;; rather have compact,
-                                   ;; cold-loadable code. -- WHN
-                                   ;; 19990928
-                                   (declare (notinline find-classoid))
-                                   (find-classoid 'condition)))
+(setf (condition-classoid-report (find-classoid 'condition))
       (lambda (cond stream)
         (format stream "Condition ~S was signalled." (type-of cond))))
 
@@ -333,13 +315,7 @@
       ;; => (#<DEFSTRUCT-SLOT-DESCRIPTION ACTUAL-INITARGS>
       ;;     #<DEFSTRUCT-SLOT-DESCRIPTION ASSIGNED-SLOTS>)
       (setf (layout-info layout)
-            (locally
-                ;; KLUDGE: There's a FIND-CLASS DEFTRANSFORM for constant class
-                ;; names which creates fast but non-cold-loadable, non-compact
-                ;; code. In this context, we'd rather have compact, cold-loadable
-                ;; code. -- WHN 19990928
-                (declare (notinline find-classoid))
-              (layout-info (classoid-layout (find-classoid 'condition)))))
+            (layout-info (classoid-layout (find-classoid 'condition))))
 
       (setf (find-classoid name) class)
 
@@ -407,9 +383,9 @@
   (setf (condition-classoid-report (find-classoid name))
         report))
 
-(defun %define-condition (name parent-types layout slots documentation
+(defun %define-condition (name parent-types layout slots
                           direct-default-initargs all-readers all-writers
-                          source-location)
+                          source-location &optional documentation)
   (with-single-package-locked-error
       (:symbol name "defining ~A as a condition")
     (%compiler-define-condition name parent-types layout all-readers all-writers)
@@ -576,11 +552,12 @@
                             ',parent-types
                             ',layout
                             (list ,@(slots))
-                            ,documentation
                             (list ,@direct-default-initargs)
                             ',(all-readers)
                             ',(all-writers)
-                            (sb!c:source-location))
+                            (sb!c:source-location)
+                            ,@(and documentation
+                                   `(,documentation)))
          ;; This needs to be after %DEFINE-CONDITION in case :REPORT
          ;; is a lambda referring to condition slot accessors:
          ;; they're not proclaimed as functions before it has run if
@@ -1674,32 +1651,21 @@ the usual naming convention (names like *FOO*) for special variables"
                             (deprecated-name condition)))))))
 
   (define-deprecation-warning early-deprecation-warning style-warning nil
-    #+sb-xc-host
-    "~%~@<~:@_In future SBCL versions ~
-     ~/sb!impl:print-symbol-with-prefix/ will signal a full warning ~
-     at compile-time.~:@>"
-    #-sb-xc-host
-    "~%~@<~:@_In future SBCL versions ~
-     ~/sb-impl:print-symbol-with-prefix/ will signal a full warning ~
-     at compile-time.~:@>")
+    (!uncross-format-control
+     "~%~@<~:@_In future SBCL versions ~
+      ~/sb!impl:print-symbol-with-prefix/ will signal a full warning ~
+      at compile-time.~:@>"))
 
   (define-deprecation-warning late-deprecation-warning warning t
-    #+sb-xc-host
-    "~%~@<~:@_In future SBCL versions ~
-     ~/sb!impl:print-symbol-with-prefix/ will signal a runtime ~
-     error.~:@>"
-    #-sb-xc-host
-    "~%~@<~:@_In future SBCL versions ~
-     ~/sb-impl:print-symbol-with-prefix/ will signal a runtime ~
-     error.~:@>")
+    (!uncross-format-control
+     "~%~@<~:@_In future SBCL versions ~
+      ~/sb!impl:print-symbol-with-prefix/ will signal a runtime ~
+      error.~:@>"))
 
   (define-deprecation-warning final-deprecation-warning warning t
-    #+sb-xc-host
-    "~%~@<~:@_An error will be signaled at runtime for ~
-     ~/sb!impl:print-symbol-with-prefix/.~:@>"
-    #-sb-xc-host
-    "~%~@<~:@_An error will be signaled at runtime for ~
-     ~/sb-impl:print-symbol-with-prefix/.~:@>"))
+    (!uncross-format-control
+     "~%~@<~:@_An error will be signaled at runtime for ~
+      ~/sb!impl:print-symbol-with-prefix/.~:@>")))
 
 (define-condition deprecation-error (error deprecation-condition)
   ())

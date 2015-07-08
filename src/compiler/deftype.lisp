@@ -16,9 +16,6 @@
         (sb!kernel::arg-count-error 'deftype (car whole) (cdr whole) nil 0 0)
         expansion)))
 
-(defun %deftype (name)
-  (setf (classoid-cell-pcl-class (find-classoid-cell name :create t)) nil))
-
 (defvar !*xc-processed-deftypes* nil)
 (def!macro sb!xc:deftype (&whole form name lambda-list &body body)
   #!+sb-doc
@@ -26,7 +23,7 @@
   (unless (symbolp name)
     (bad-type name 'symbol "Type name is not a symbol:~%  ~S"
               form))
-  (multiple-value-bind (expander-form doc source-location-form)
+  (multiple-value-bind (expander-form doc lambda-list source-location-form)
       (multiple-value-bind (forms decls doc) (parse-body body)
         ;; FIXME: We could use CONSTANTP here to deal with slightly more
         ;; complex deftypes using CONSTANT-TYPE-EXPANDER, but that XC:CONSTANTP
@@ -34,15 +31,16 @@
         (if (and (not lambda-list) (not decls) (not (cdr forms))
                  (or (member (car forms) '(t nil))
                      (and (consp (car forms)) (eq 'quote (caar forms)))))
-            (values `(constant-type-expander ,(car forms)) doc '(sb!c:source-location))
-            (with-unique-names (whole)
-              (multiple-value-bind (macro-body local-decs doc)
-                  (parse-defmacro lambda-list whole body name 'deftype :default-default ''*)
-                (values `(lambda (,whole)
-                           ,@local-decs
-                           ,macro-body)
-                        doc
-                        nil)))))
+            (values `(constant-type-expander ,(car forms)) doc '()
+                    '(sb!c:source-location))
+            (multiple-value-bind (def arglist doc)
+                ;; FIXME: it seems non-ANSI-compliant to pretend every lexenv
+                ;; is nil. See also lp#309140.
+                (make-macro-lambda `(type-expander ,name)
+                                   lambda-list body 'deftype name
+                                   :doc-string-allowed :external
+                                   :environment :ignore)
+              (values def doc arglist))))
     `(progn
        #+sb-xc-host
        (eval-when (:compile-toplevel)
@@ -53,7 +51,6 @@
          (%compiler-deftype ',name
                             ',lambda-list
                             ,expander-form
-                            ,doc
-                            ,source-location-form))
-       (%deftype ',name)
-       ',name)))
+                            ,source-location-form
+                            ,@(and doc
+                                   `(,doc)))))))

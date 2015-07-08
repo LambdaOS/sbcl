@@ -490,10 +490,6 @@
 ;; Descriptors are target fixnums
 (deftype info-descriptor () `(signed-byte ,sb!vm:n-fixnum-bits))
 
-;; Every Name amenable to storage in info-vectors has an auxilliary key
-;; as explained above, except that the root name itself has none.
-(defconstant +no-auxilliary-key+ 0)
-
 ;; An empty info-vector. Its 0th field describes that there are no more fields.
 (defconstant-eqx +nil-packed-infos+ #(0) #'equalp)
 
@@ -1153,8 +1149,12 @@ This is interpreted as
                (if (listp info-holder) (cdr info-holder) info-holder))))
 
 ;;; The current *INFO-ENVIRONMENT*, a structure of type INFO-HASHTABLE.
-(declaim (type info-hashtable *info-environment*))
-(defvar *info-environment*)
+;;; Cheat by setting to nil before the type is proclaimed
+;;; so that we can then also proclaim ALWAYS-BOUND.
+(defvar *info-environment* nil)
+#-sb-xc-host
+(declaim (type info-hashtable *info-environment*)
+         (always-bound *info-environment*))
 
 ;;; Update the INFO-NUMBER for NAME in the global environment,
 ;;; setting it to NEW-VALUE. This is thread-safe in the presence

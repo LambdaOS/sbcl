@@ -105,11 +105,16 @@
                                        (subseq optional 0 (1+ last-not-rest))))
                                 rest))))
 
-(defun parse-args-types (lambda-listy-thing)
+(defun parse-args-types (lambda-listy-thing context)
   (multiple-value-bind (llks required optional rest keys)
-      (parse-lambda-list lambda-listy-thing
-                         :context 'type :disallow '(&aux &environment)
-                         :silent t)
+      (parse-lambda-list
+       lambda-listy-thing
+       :context context
+       :accept (ecase context
+                 (:values-type (lambda-list-keyword-mask '(&optional &rest)))
+                 (:function-type (lambda-list-keyword-mask
+                                  '(&optional &rest &key &allow-other-keys))))
+       :silent t)
     (let ((required (mapcar #'single-value-specifier-type required))
           (optional (mapcar #'single-value-specifier-type optional))
           (rest (when rest (single-value-specifier-type (car rest))))
@@ -130,9 +135,7 @@
       (multiple-value-bind (required optional rest)
           (canonicalize-args-type-args required optional rest
                                        (ll-kwds-keyp llks))
-        (values required optional rest
-                (ll-kwds-keyp llks) keywords (ll-kwds-allowp llks)
-                (not (null llks)))))))
+        (values llks required optional rest keywords)))))
 
 (defstruct (values-type
             (:include args-type

@@ -25,9 +25,8 @@
   (and (lvar-p thing)
        (or (let ((use (principal-lvar-use thing)))
              (and (ref-p use) (constant-p (ref-leaf use))))
-           ;; check for EQL types (but not singleton numeric types)
-           (let ((type (lvar-type thing)))
-             (values (type-singleton-p type))))))
+           ;; check for EQL types and singleton numeric types
+           (values (type-singleton-p (lvar-type thing))))))
 
 ;;; Return the constant value for an LVAR whose only use is a constant
 ;;; node.
@@ -1380,11 +1379,11 @@
             (throw 'give-up-ir1-transform :delayed)))))
 
 ;;; Poor man's catching and resignalling
-;;; Implicit GIVE-UP macrolet will resignal the give-up "condition"
-(defmacro catch-give-up-ir1-transform (form &body gave-up-body)
+;;; Implicit %GIVE-UP macrolet will resignal the give-up "condition"
+(defmacro catch-give-up-ir1-transform ((form &optional args) &body gave-up-body)
   (let ((block (gensym "BLOCK"))
         (kind (gensym "KIND"))
-        (args (gensym "ARGS")))
+        (args (or args (gensym "ARGS"))))
     `(block ,block
        (multiple-value-bind (,kind ,args)
            (catch 'give-up-ir1-transform
@@ -1393,7 +1392,7 @@
            (:delayed
             (throw 'give-up-ir1-transform :delayed))
            ((:failure :aborted)
-            (macrolet ((give-up ()
+            (macrolet ((%give-up ()
                          `(throw 'give-up-ir1-transform (values ,',kind
                                                                 ,',args))))
               ,@gave-up-body)))))))

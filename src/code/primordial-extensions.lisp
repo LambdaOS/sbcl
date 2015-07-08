@@ -111,6 +111,13 @@
                      ,label-2
                      (unless ,(first endlist) (go ,label-1))
                      (return-from ,block (progn ,@(rest endlist))))))))))
+
+;; Define "exchanged subtract" So that DECF on a symbol requires no LET binding:
+;;  (DECF I (EXPR)) -> (SETQ I (XSUBTRACT (EXPR) I))
+;; which meets the CLHS 5.1.3 requirement to eval (EXPR) prior to reading
+;; the old value of I. Formerly in 'setf' but too late to avoid full calls.
+(declaim (inline xsubtract))
+(defun xsubtract (a b) (- b a))
 
 ;;;; GENSYM tricks
 
@@ -135,28 +142,28 @@
 
 ;;; Return a list of N gensyms. (This is a common suboperation in
 ;;; macros and other code-manipulating code.)
-(declaim (ftype (function (index &optional t) (values list &optional))
+(declaim (ftype (function (unsigned-byte &optional t) (values list &optional))
                 make-gensym-list))
 (defun make-gensym-list (n &optional name)
-  (when (eq t name)
-    (break))
-  (if name
-      (loop repeat n collect (sb!xc:gensym (string name)))
-      (loop repeat n collect (sb!xc:gensym))))
+  (let ((arg (if name (string name) "G")))
+    (loop repeat n collect (sb!xc:gensym arg))))
 
 ;;;; miscellany
 
 ;;; Lots of code wants to get to the KEYWORD package or the
 ;;; COMMON-LISP package without a lot of fuss, so we cache them in
-;;; variables. TO DO: How much does this actually buy us? It sounds
-;;; sensible, but I don't know for sure that it saves space or time..
-;;; -- WHN 19990521
-;;;
-;;; (The initialization forms here only matter on the cross-compilation
-;;; host; In the target SBCL, these variables are set in cold init.)
-(declaim (type package *cl-package* *keyword-package*))
-(defglobal *cl-package*      (find-package "COMMON-LISP"))
-(defglobal *keyword-package* (find-package "KEYWORD"))
+;;; variables on the host, or use L-T-V forms on the target.
+(macrolet ((def-it (sym expr)
+             #+sb-xc-host
+             `(progn (declaim (type package ,sym))
+                     (defglobal ,sym ,expr))
+             #-sb-xc-host
+             ;; We don't need to declaim the type. FIND-PACKAGE
+             ;; returns a package, and L-T-V propagates types.
+             ;; It's ugly how it achieves that, but it's a separate concern.
+             `(define-symbol-macro ,sym (load-time-value ,expr t))))
+  (def-it *cl-package* (find-package "COMMON-LISP"))
+  (def-it *keyword-package* (find-package "KEYWORD")))
 
 ;;; Concatenate together the names of some strings and symbols,
 ;;; producing a symbol in the current package.

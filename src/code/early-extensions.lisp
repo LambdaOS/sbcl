@@ -215,6 +215,10 @@
       (and (consp x)
            (list-of-length-at-least-p (cdr x) (1- n)))))
 
+(declaim (inline ensure-list))
+(defun ensure-list (thing)
+  (if (listp thing) thing (list thing)))
+
 ;;; Is X is a positive prime integer?
 (defun positive-primep (x)
   ;; This happens to be called only from one place in sbcl-0.7.0, and
@@ -292,7 +296,8 @@
 ;;; in the functional position, including macros and lambdas.
 (defmacro collect (collections &body body)
   (let ((macros ())
-        (binds ()))
+        (binds ())
+        (ignores ()))
     (dolist (spec collections)
       (unless (proper-list-of-length-p spec 1 3)
         (error "malformed collection specifier: ~S" spec))
@@ -307,6 +312,7 @@
           (let ((n-tail (gensym (concatenate 'string
                                              (symbol-name name)
                                              "-N-TAIL-"))))
+            (push n-tail ignores)
             (if default
               (push `(,n-tail (last ,n-value)) binds)
               (push n-tail binds))
@@ -316,7 +322,13 @@
           (push `(,name (&rest args)
                    (collect-normal-expander ',n-value ',kind args))
                 macros))))
-    `(macrolet ,macros (let* ,(nreverse binds) ,@body))))
+    `(macrolet ,macros
+       (let* ,(nreverse binds)
+         ;; Even if the user reads each collection result,
+         ;; reader conditionals might statically eliminate all writes.
+         ;; Since we don't know, all the -n-tail variable are ignorable.
+         ,@(if ignores `((declare (ignorable ,@ignores))))
+         ,@body))))
 
 ;;;; some old-fashioned functions. (They're not just for old-fashioned
 ;;;; code, they're also used as optimized forms of the corresponding
@@ -476,6 +488,77 @@
              (setq ,val (pop ,tail))
              (progn ,@body)))))
 
+;;; (binding* ({(names initial-value [flag])}*) body)
+;;; FLAG may be NIL or :EXIT-IF-NULL
+;;;
+;;; This form unites LET*, MULTIPLE-VALUE-BIND and AWHEN.
+;;; Any name in a list of names may be NIL to ignore the respective value.
+;;; If NAMES itself is nil, the initial-value form is evaluated only for effect.
+;;;
+;;; Clauses with no flag and one binding are equivalent to LET.
+;;;
+;;; Caution: don't use declarations of the form (<non-builtin-type-id> <var>)
+;;; before the INFO database is set up in building the cross-compiler,
+;;; or you will probably lose.
+;;; Of course, since some other host Lisps don't seem to think that's
+;;; acceptable syntax anyway, you're pretty much prevented from writing it.
+;;;
+(def!macro binding* ((&rest clauses) &body body)
+  (unless clauses ; wrap in LET to preserve non-toplevelness
+    (return-from binding* `(let () ,@body)))
+  (multiple-value-bind (body decls) (parse-body body :doc-string-allowed nil)
+    ;; Generate an abstract representation that combines LET* clauses.
+    (let (repr)
+      (dolist (clause clauses)
+        (destructuring-bind (symbols value-form &optional flag) clause
+          (declare (type (member :exit-if-null nil) flag))
+          (let* ((ignore nil)
+                 (symbols
+                  (cond ((not (listp symbols)) (list symbols))
+                        ((not symbols) (setq ignore (list (gensym))))
+                        (t (mapcar
+                            (lambda (x) (or x (car (push (gensym) ignore))))
+                            symbols))))
+                 (flags (logior (if (cdr symbols) 1 0) (if flag 2 0)))
+                 (last (car repr)))
+            ;; EVENP => this clause does not entail multiple-value-bind
+            (cond ((and (evenp flags) (eql (car last) 0))
+                   (setf (first last) flags)
+                   (push (car symbols) (second last))
+                   (push value-form (third last))
+                   (setf (fourth last) (nconc ignore (fourth last))))
+                  (t
+                   (push (list flags symbols (list value-form) ignore)
+                         repr))))))
+      ;; Starting with the innermost binding clause, snarf out the
+      ;; applicable declarations. (Clauses are currently reversed)
+      (dolist (abstract-clause repr)
+        (when decls
+          (multiple-value-bind (binding-decls remaining-decls)
+              (extract-var-decls decls (second abstract-clause))
+            (setf (cddddr abstract-clause) binding-decls)
+            (setf decls remaining-decls))))
+      ;; Generate sexprs from inside out.
+      (loop with listp = t ; BODY is already a list
+            for (flags symbols values ignore . binding-decls) in repr
+            ;; Maybe test the last bound symbol in the clause for LET*
+            ;; or 1st symbol for mv-bind. Either way, the first of SYMBOLS.
+            for inner = (if (logtest flags 2) ; :EXIT-IF-NULL was specified.
+                            (prog1 `(when ,(car symbols)
+                                      ,@(if listp body (list body)))
+                              (setq listp nil))
+                            body)
+         do (setq body
+                  `(,.(if (evenp flags)
+                          `(let* ,(nreverse (mapcar #'list symbols values)))
+                          `(multiple-value-bind ,symbols ,(car values)))
+                    ,@(when binding-decls (list binding-decls))
+                    ,@(when ignore `((declare (ignorable ,@ignore))))
+                    ,@decls ; anything leftover
+                    ,@(if listp inner (list inner)))
+                  listp nil
+                  decls nil))
+      body)))
 
 ;;;; hash cache utility
 
@@ -564,24 +647,24 @@
 ;; so a 1-arg/1-result cache line needn't cons at all except once
 ;; (and maybe not even that if we make the cache into pairs of cells).
 ;; But this way is easier to understand, for now anyway.
+(eval-when (#-sb-xc :compile-toplevel :load-toplevel :execute)
+  (defun hash-cache-line-allocator (n)
+    (aref #.(coerce (loop for i from 2 to 6
+                          collect (symbolicate "ALLOC-HASH-CACHE-LINE/"
+                                               (char "23456" (- i 2))))
+                    'vector)
+          (- n 2))))
 (macrolet ((def (n)
              (let* ((ftype `(sfunction ,(make-list n :initial-element t) t))
-                    (fn (symbolicate "ALLOC-HASH-CACHE-LINE/"
-                                     (write-to-string n)))
-                    (args (loop for i from 1 to n
-                                collect (make-symbol (write-to-string i)))))
+                    (fn (hash-cache-line-allocator n))
+                    (args (make-gensym-list n)))
                `(progn
                   (declaim (ftype ,ftype ,fn))
                   (defun ,fn ,args
                     (declare (optimize (safety 0)))
                     ,(if (<= n 3)
                          `(list* ,@args)
-                         ;; FIXME: (VECTOR ,@args) should emit exactly the
-                         ;; same code as this, except it is worse.
-                         `(let ((a (make-array ,n)))
-                            ,@(loop for i from 0 for arg in args
-                                    collect `(setf (svref a ,i) ,arg))
-                            a)))))))
+                         `(vector ,@args)))))))
   (def 2)
   (def 3)
   (def 4)
@@ -657,9 +740,7 @@
                        (setq ,hashval (ash ,hashval ,(- hash-bits)))))))
                (multiple-value-bind ,result-temps (funcall ,thunk)
                  (let ((,entry
-                        (,(let ((*package* (symbol-package 'alloc-hash-cache)))
-                            (symbolicate "ALLOC-HASH-CACHE-LINE/"
-                                         (write-to-string (+ nargs values))))
+                        (,(hash-cache-line-allocator (+ nargs values))
                          ,@arg-vars ,@result-temps))
                        (,cache
                         (truly-the ,cache-type
@@ -711,10 +792,9 @@
                                         memoizer-supplied-p)
                               &allow-other-keys)
                         args &body body-decls-doc)
-  (let ((arg-names (mapcar #'car args)))
-    ;; What I wouldn't give to be able to use BINDING*, right?
-    (multiple-value-bind (forms decls doc) (parse-body body-decls-doc)
-      `(progn
+  (binding* (((forms decls doc) (parse-body body-decls-doc))
+             (arg-names (mapcar #'car args)))
+    `(progn
         (!define-hash-cache ,name ,args ,@options)
         (defun ,name ,arg-names
           ,@decls
@@ -727,7 +807,7 @@
                          (lambda () ,@body) ,@',arg-names)))
              ,@(if memoizer-supplied-p
                    forms
-                   `((,memoizer ,@forms)))))))))
+                   `((,memoizer ,@forms))))))))
 
 ;;; FIXME: maybe not the best place
 ;;;
@@ -1101,7 +1181,7 @@
                                    :identity ,identity)
            ,@(nreverse reversed-prints))))))
 
-(defun print-symbol-with-prefix (stream symbol colon at)
+(defun print-symbol-with-prefix (stream symbol &optional colon at)
   #!+sb-doc
   "For use with ~/: Write SYMBOL to STREAM as if it is not accessible from
   the current package."
@@ -1332,7 +1412,11 @@
 ;; Given DECLS as returned by from parse-body, and SYMBOLS to be bound
 ;; (with LET, MULTIPLE-VALUE-BIND, etc) return two sets of declarations:
 ;; those which pertain to the variables and those which don't.
+;; The first returned value is NIL or a single expression headed by DECLARE.
+;; The second is a list of expressions resembling the input DECLS.
 (defun extract-var-decls (decls symbols)
+  (unless symbols ; Don't bother filtering DECLS, just return them.
+    (return-from extract-var-decls (values nil decls)))
   (labels ((applies-to-variables (decl)
              ;; If DECL is a variable-affecting declaration, then return
              ;; the subset of SYMBOLS to which DECL applies.
@@ -1375,95 +1459,6 @@
                      decls)))
         (values (awhen (binding-decls) `(declare ,@it))
                 (mapcan (lambda (x) (if x (list `(declare ,@x)))) filtered))))))
-
-;;; (binding* ({(names initial-value [flag])}*) body)
-;;; FLAG may be NIL or :EXIT-IF-NULL
-;;;
-;;; This form unites LET*, MULTIPLE-VALUE-BIND and AWHEN.
-;;; Any name in a list of names may be NIL to ignore the respective value.
-;;; If NAMES itself is nil, the initial-value form is evaluated only for effect.
-;;;
-;;; Clauses with no flag and one binding are equivalent to LET.
-;;;
-;;; Caution: don't use declarations of the form (<non-builtin-type-id> <var>)
-;;; before the INFO database is set up in building the cross-compiler,
-;;; or you will probably lose.
-;;; Of course, since some other host Lisps don't seem to think that's
-;;; acceptable syntax anyway, you're pretty much prevented from writing it.
-;;;
-(defmacro binding* ((&rest bindings) &body body)
-  (multiple-value-bind (forms decls) (parse-body body :doc-string-allowed nil)
-    (labels
-      ((recurse (bindings decls &aux ignores)
-         (cond
-           ((some (lambda (x)
-                    (destructuring-bind (names value-form &optional flag) x
-                      (declare (ignore value-form))
-                      (or flag (not (symbolp names)))))
-                  bindings)
-            (destructuring-bind (names value-form &optional flag) (car bindings)
-              (etypecase names
-                ;; () for names is esoteric. Does anyone really need that?
-                (null   (setq names (list (gensym)) ignores names))
-                (symbol (setq names (list names)))
-                (list
-                 (setq names (mapcar (lambda (name)
-                                       (or name (car (push (gensym) ignores))))
-                                     names))))
-              (multiple-value-bind (binding-decls other-decls)
-                  ;; If no more bindings, and no (WHEN ...) before the FORMS,
-                  ;; then don't bother parsing decls.
-                  (if (or (cdr bindings) flag)
-                      (extract-var-decls decls
-                                         (filter-names names (cdr bindings)))
-                      (values nil decls))
-                (multiple-value-bind (other-decls continue)
-                    (acond ((cdr bindings)
-                            (values nil (recurse it other-decls)))
-                           (t
-                            (values other-decls forms)))
-                  `((,@(if (singleton-p names)
-                           `(let ((,(car names) ,value-form)))
-                           `(multiple-value-bind ,names ,value-form))
-                      ,@(decl-expr binding-decls ignores)
-                      ,@other-decls
-                      ,@(ecase flag
-                          ((nil) continue)
-                          ((:exit-if-null)
-                           `((when ,(first names) ,@continue))))))))))
-           (t
-            ;; This case is not strictly necessary now that declarations that
-            ;; affect variables are correctly inserted into the M-V-BIND,
-            ;; but it makes the expansion more legible/concise when applicable.
-            `((let* ,(mapcar (lambda (binding)
-                               (if (car binding)
-                                   binding
-                                   (let ((var (gensym)))
-                                     (push var ignores)
-                                     (cons var (cdr binding)))))
-                             bindings)
-                ,@(decl-expr nil ignores)
-                ,@decls
-                ,@forms)))))
-       (filter-names (names more-bindings)
-         ;; Return the subset of SYMBOLs that does not intersect any
-         ;; symbol in MORE-BINDINGS. This makes declarations apply only
-         ;; to the final occurrence of a repeated name, as is the custom.
-         (remove-if (lambda (x) (subsequently-bound-p x more-bindings)) names))
-       (subsequently-bound-p (name more-bindings)
-         (member-if (lambda (binding)
-                      (let ((names (car binding)))
-                        (if (listp names) (memq name names) (eq name names))))
-                    more-bindings))
-       (decl-expr (binding-decls ignores)
-         (nconc (if binding-decls (list binding-decls))
-         ;; IGNORABLE, not IGNORE, just in case :EXIT-IF-NULL reads a gensym
-               (if ignores `((declare (ignorable ,@ignores)))))))
-    ;; Zero bindings have to be special-cased. RECURSE returns a list of forms
-    ;; because we musn't wrap BODY in a PROGN if it contains declarations,
-    ;; so we unwrap once here, but if the body was returned as the base case
-    ;; of recursion then (CAR (RECURSE)) would be wrong.
-    (if bindings (car (recurse bindings decls)) `(locally ,@body)))))
 
 ;;; Delayed evaluation
 (defmacro delay (form)
@@ -1546,17 +1541,17 @@ to :INTERPRET, an interpreter will be used.")
 
 ;;; Helper for making the DX closure allocation in macros expanding
 ;;; to CALL-WITH-FOO less ugly.
-(defmacro dx-flet (functions &body forms)
+(def!macro dx-flet (functions &body forms)
   `(flet ,functions
-     (declare (#+sb-xc-host dynamic-extent #-sb-xc-host truly-dynamic-extent
-               ,@(mapcar (lambda (func) `(function ,(car func))) functions)))
+     (declare (truly-dynamic-extent ,@(mapcar (lambda (func) `#',(car func))
+                                              functions)))
      ,@forms))
 
 ;;; Another similar one.
-(defmacro dx-let (bindings &body forms)
+(def!macro dx-let (bindings &body forms)
   `(let ,bindings
-     (declare (#+sb-xc-host dynamic-extent #-sb-xc-host truly-dynamic-extent
-               ,@(mapcar (lambda (bind) (if (consp bind) (car bind) bind))
+     (declare (truly-dynamic-extent
+               ,@(mapcar (lambda (bind) (if (listp bind) (car bind) bind))
                          bindings)))
      ,@forms))
 
@@ -1582,13 +1577,12 @@ to :INTERPRET, an interpreter will be used.")
     ;; Sort by descending seek count to rank by likely relative importance
     (dolist (symbol (sort (copy-list *cache-vector-symbols*) #'>
                           :key (lambda (x) (aref (cache-stats x) 0))))
-      ;; Sadly we can't use BINDING* within this file
-      (multiple-value-bind (stats short-name) (cache-stats symbol)
-        (let* ((seek (aref stats 0))
-               (miss (aref stats 1))
-               (hit (- seek miss))
-               (evict (aref stats 2))
-               (cache (symbol-value symbol)))
+      (binding* (((stats short-name) (cache-stats symbol))
+                 (seek (aref stats 0))
+                 (miss (aref stats 1))
+                 (hit (- seek miss))
+                 (evict (aref stats 2))
+                 (cache (symbol-value symbol)))
           (format t "~9d ~9d (~5,1f%) ~8d (~5,1f%) ~4d ~6,1f% ~A~%"
                   seek hit
                   (if (plusp seek) (* 100 (/ hit seek)))
@@ -1598,7 +1592,7 @@ to :INTERPRET, an interpreter will be used.")
                   (if (plusp (length cache))
                       (* 100 (/ (count-if-not #'fixnump cache)
                                 (length cache))))
-                  short-name)))))))
+                  short-name))))))
 
 (in-package "SB!KERNEL")
 
@@ -1721,4 +1715,5 @@ lines and columns."
         `(let ((,var (make-string-output-stream)))
            ,@decls
            ,@forms
-           (get-output-stream-string ,var)))))
+           (truly-the (simple-array character (*))
+                      (get-output-stream-string ,var))))))

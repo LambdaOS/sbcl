@@ -176,24 +176,16 @@ invoked. In that case it will store into PLACE and start over."
     (error 'simple-program-error
            :format-control "cannot define a compiler-macro for a special operator: ~S"
            :format-arguments (list name)))
-  (with-unique-names (whole environment)
-    (multiple-value-bind (body local-decs doc)
-        (parse-defmacro lambda-list whole body name 'define-compiler-macro
-                        :environment environment)
-      (let ((def `(lambda (,whole ,environment)
-                    ,@(sb!c:macro-policy-decls)
-                    ,@local-decs
-                    ,body))
-            (debug-name (sb!c::debug-name 'compiler-macro-function name)))
-        `(progn
+  (multiple-value-bind (def lambda-list)
+      ;; DEBUG-NAME is called primarily for its side-effect of asserting
+      ;; that (COMPILER-MACRO-FUNCTION x) is not a legal function name.
+      (make-macro-lambda (sb!c::debug-name 'compiler-macro name)
+                         lambda-list body 'define-compiler-macro name)
+    `(progn
           (eval-when (:compile-toplevel)
            (sb!c::%compiler-defmacro :compiler-macro-function ',name t))
           (eval-when (:compile-toplevel :load-toplevel :execute)
-           (sb!c::%define-compiler-macro ',name
-                                         #',def
-                                         ',lambda-list
-                                         ,doc
-                                         ',debug-name)))))))
+           (sb!c::%define-compiler-macro ',name ,def ',lambda-list)))))
 
 ;;; FIXME: This will look remarkably similar to those who have already
 ;;; seen the code for %DEFMACRO in src/code/defmacro.lisp.  Various
@@ -201,18 +193,15 @@ invoked. In that case it will store into PLACE and start over."
 (macrolet
     ((def (times set-p)
          `(eval-when (,@times)
-           (defun sb!c::%define-compiler-macro
-               (name definition lambda-list doc debug-name)
+           (defun sb!c::%define-compiler-macro (name definition lambda-list)
              ,@(unless set-p
-                 '((declare (ignore lambda-list doc debug-name))))
+                 '((declare (ignore lambda-list))))
              (sb!c::warn-if-compiler-macro-dependency-problem name)
              ;; FIXME: warn about incompatible lambda list with
              ;; respect to parent function?
              (setf (sb!xc:compiler-macro-function name) definition)
              ,(when set-p
-                    `(setf (%fun-doc definition) doc
-                           (%fun-lambda-list definition) lambda-list
-                           (%fun-name definition) debug-name))
+                `(setf (%fun-lambda-list definition) lambda-list))
              name))))
   (progn
     (def (:load-toplevel :execute) #-sb-xc-host t #+sb-xc-host nil)

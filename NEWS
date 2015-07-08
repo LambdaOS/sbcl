@@ -1,4 +1,37 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
+changes relative to sbcl-1.2.13:
+  * DESTRUCTURING-BIND has been totally reimplemented from scratch
+    to address a handful of performance and correctness issues.
+    Some minor behavioral differences exist regarding order of evaluation
+    of default forms for unsupplied &OPTIONAL and &KEY arguments
+    when nested destructuring patterns are involved.
+    (lp#707556, lp#707573, lp#707578, lp#708051)
+
+changes in sbcl-1.2.13 relative to sbcl-1.2.12:
+  * incompatible change: on success, TRY-SEMAPHORE and WAIT-ON-SEMAPHORE
+    return the new count
+  * enhancement: WAIT-ON-SEMAPHORE accepts a decrement parameter
+  * enhancement: JOIN-THREAD allows distinguishing timeout vs. abort in all
+    situations
+  * enhancement: On Windows DBG_PRINTEXCEPTION_C is handled and its message is
+    printed. (lp#1437947)
+  * bug-fix: TRUENAME works properly on broken symlinks presented as
+    directories. (lp#1458164)
+  * bug fix: Inlined DPB and DEPOSIT-FIELD don't interfere with left-to-right
+    order of argument evaluation. (lp#1458190)
+  * bug fix: (SETF (LDB (BYTE 1 2 JUNK) X) 0) is rightly rejected.
+  * bug fix: DEFSETF lambda lists should not permit argument destructuring.
+  * bug fix: calls to (SETF SLOT-VALUE) on a missing slot would in certain
+    situations incorrectly return the result of a SLOT-MISSING method
+    instead of always returning the new value. (lp#1460381)
+  * bug fix: a DEFMACRO occurring not at toplevel and capturing parts of
+    its lexical environment (thus being a closure) caused expressions
+    involving the macro name to cause corruption in the pretty-printer
+    due to faulty introspection of the lambda list of a closure.
+  * bug fix: out of line MAP/MAP-INTO check that the results produced by the
+    function are of the matching sequence type. (lp#1459581)
+  * bug fix: pretty-printing of '(LET `((,X ,Y)) :B) is handled correctly.
+
 changes in sbcl-1.2.12 relative to sbcl-1.2.11:
   * minor incompatible change: the SB-C::*POLICY* variable is no longer
     a list. Code which manipulated it as such (including but not limited
@@ -65,7 +98,7 @@ changes in sbcl-1.2.10 relative to sbcl-1.2.9:
     encountering invalid FUNCTION forms like (function 1)
   * bug fix: express proper dependencies in the ASDF contrib, to support
     systems where make runs in parallel.  (lp#1434768; thanks to Nikhil
-    Benesch) 
+    Benesch)
 
 changes in sbcl-1.2.9 relative to sbcl-1.2.8:
   * minor incompatible change and bug fix: unboxed numeric constants

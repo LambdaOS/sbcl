@@ -72,6 +72,11 @@ Example:
           ,new))))
 
 EXPERIMENTAL: Interface subject to change."
+  ;; FIXME: this seems wrong on two points:
+  ;; 1. if TRULY-THE had a CAS expander (which it doesn't) we'd want
+  ;;    to use %MACROEXPAND[-1] so as not to lose the "truly-the"-ness
+  ;; 2. if both a CAS expander and a macro exist, the CAS expander
+  ;;    should be preferred before macroexpanding (just like SETF does)
     (let ((expanded (sb!xc:macroexpand place environment)))
       (flet ((invalid-place ()
            (error "Invalid place to CAS: ~S -> ~S" place expanded)))
@@ -147,19 +152,18 @@ can it verify that they are atomic: it is up to the implementor of a CAS
 expansion to ensure its atomicity.
 
 EXPERIMENTAL: Interface subject to change."
-  (with-unique-names (whole environment)
-    (multiple-value-bind (body decls doc)
-        (parse-defmacro lambda-list whole body accessor
-                        'define-cas-expander
-                        :environment environment
-                        :wrap-block nil)
-      `(eval-when (:compile-toplevel :load-toplevel :execute)
-         (setf (info :cas :expander ',accessor)
-               (lambda (,whole ,environment)
-                 ,@(when doc (list doc))
-                 ,@decls
-                 ,body))))))
+  `(eval-when (:compile-toplevel :load-toplevel :execute)
+     (setf (info :cas :expander ',accessor)
+           ,(make-macro-lambda `(cas-expand ,accessor) lambda-list body
+                               'define-cas-expander accessor))))
 
+;; FIXME: this interface is bogus - short-form DEFSETF/CAS does not
+;; want a lambda-list. You just blindly substitute
+;;  (CAS (PLACE arg1 ... argN) old new) -> (F arg1 ... argN old new).
+;; What role can this lambda-list have when there is no user-provided
+;; code to read the variables?
+;; And as mentioned no sbcl-devel, &REST is beyond bogus, it's broken.
+;;
 (def!macro defcas (accessor lambda-list function &optional docstring)
   #!+sb-doc
   "Analogous to short-form DEFSETF. Defines FUNCTION as responsible
@@ -173,7 +177,7 @@ user of DEFCAS to ensure that the function specified is atomic.
 EXPERIMENTAL: Interface subject to change."
   (multiple-value-bind (llks reqs opts rest)
       (parse-lambda-list lambda-list
-                         :disallow '(&key &allow-other-keys &aux &environment)
+                         :accept (lambda-list-keyword-mask '(&optional &rest))
                          :context "a DEFCAS lambda-list")
     (declare (ignore llks))
     `(define-cas-expander ,accessor ,lambda-list

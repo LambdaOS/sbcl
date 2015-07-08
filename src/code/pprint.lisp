@@ -1442,11 +1442,12 @@ line break."
 ;;; the first N arguments specially then indent any further arguments
 ;;; like a body.
 (defun macro-indentation (name)
-  (labels ((proper-list-p (list)
-             (not (nth-value 1 (ignore-errors (list-length list)))))
-           (macro-arglist (name)
-             (%simple-fun-arglist (macro-function name)))
-           (clean-arglist (arglist)
+  (labels ((clean-arglist (arglist)
+             ;; FIXME: for purposes of introspection, we should never "leak"
+             ;; that a macro uses an &AUX variable, that it takes &WHOLE,
+             ;; or that it cares about its lexenv (though that's debatable).
+             ;; Certainly the first two aspects are not part of the macro's
+             ;; interface, and as such, should not be stored at all.
              "Remove &whole, &enviroment, and &aux elements from ARGLIST."
              (cond ((null arglist) '())
                    ((member (car arglist) '(&whole &environment))
@@ -1454,7 +1455,7 @@ line break."
                    ((eq (car arglist) '&aux)
                     '())
                    (t (cons (car arglist) (clean-arglist (cdr arglist)))))))
-    (let ((arglist (macro-arglist name)))
+    (let ((arglist (%fun-lambda-list (macro-function name))))
       (if (proper-list-p arglist)       ; guard against dotted arglists
           (position '&body (remove '&optional (clean-arglist arglist)))
           nil))))
@@ -1530,7 +1531,12 @@ line break."
   ;; Also, START-LOGICAL-BLOCK could become an FLET inside here.
   (declare (function proc))
   (with-pretty-stream (stream (out-synonym-of stream))
-    (if (not (listp object)) ; implies obj-supplied-p
+    (if (or (not (listp object)) ; implies obj-supplied-p
+            (and (eq (car object) 'quasiquote)
+                 ;; We can only bail out from printing this logical block
+                 ;; if the quasiquote printer would *NOT* punt.
+                 ;; If it would punt, then we have to forge ahead.
+                 (singleton-p (cdr object))))
         ;; the spec says "If object is not a list, it is printed using WRITE"
         ;; but I guess this is close enough.
         (output-object object stream)

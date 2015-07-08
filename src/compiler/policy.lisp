@@ -14,15 +14,9 @@
 ;;; a value for an optimization declaration
 (def!type policy-quality () '(integer 0 3))
 
+(defvar *policy*)
 ;;; global policy restrictions as a POLICY object or nil
-(defvar *policy-restrictions* nil)
-
-;;; ** FIXME: The check in ADVISE-IF-REPEATED-OPTIMIZE-QUALITIES fails
-;;; spuriously when you restrict the policy.
-;;; It asserts that you did not specify some quality value that is not the
-;;; effective value for the quality after processing all declarations,
-;;; because if it isn't, then there must have been an ignored duplicate.
-;;; So any value you specify other than the floor appears as if it got ignored.
+(!defvar *policy-restrictions* nil)
 
 (defun restrict-compiler-policy (&optional quality (min 0))
   #!+sb-doc
@@ -48,15 +42,23 @@ See also :POLICY option in WITH-COMPILATION-UNIT.
 EXPERIMENTAL INTERFACE: Subject to change."
   (declare (type policy-quality min))
   (when quality
-    ;; FIXME: If this is an interface, it should be ERROR, not AVER.
-    (aver (policy-quality-name-p quality))
-    (unless *policy-restrictions*
-      (setf *policy-restrictions* (make-policy 0 0)))
+    (unless (policy-quality-name-p quality)
+      (error "~S is not a policy quality" quality))
+    ;; The dynamic policy object is immutable, otherwise a construct like
+    ;;  (let ((*policy-restrictions* *policy-restrictions*)) ...)
+    ;; could allow alterations inside the LET to leak out.
+    ;; The structure itself does not declare slots its read-only, because
+    ;; OPTIMIZE declaration processing uses it as a scratchpad.
+    (setf *policy-restrictions*
+          (acond (*policy-restrictions* (copy-structure it))
+                 (t (make-policy 0 0))))
     (alter-policy *policy-restrictions* (policy-quality-name-p quality)
                   min (plusp min)))
   ;; Return dotted pairs, not elements that look declaration-like.
-  (mapc (lambda (x) (rplacd x (cadr x)))
-        (policy-to-decl-spec *policy-restrictions*)))
+  (if *policy-restrictions*
+      (mapc (lambda (x) (rplacd x (cadr x)))
+            (policy-to-decl-spec *policy-restrictions*))
+      '()))
 
 (defstruct (policy-dependent-quality (:copier nil))
   (name nil :type symbol :read-only t)
@@ -95,7 +97,7 @@ EXPERIMENTAL INTERFACE: Subject to change."
 ;; Each primary and dependent quality policy is assigned a small integer index.
 ;; The POLICY struct represents a set of policies in an order-insensitive way
 ;; that facilitates quicker lookup than scanning an alist.
-(defstruct (policy (:constructor make-policy
+(def!struct (policy (:constructor make-policy
                                  (primary-qualities &optional presence-bits)))
   ;; Mask with a 1 for each quality that has an explicit value in this policy.
   ;; Primary qualities fill the mask from left-to-right and dependent qualities
@@ -131,13 +133,8 @@ EXPERIMENTAL INTERFACE: Subject to change."
                   (elt **policy-dependent-qualities** index)))
              (if raw
                  ;; Raw values are insensitive to *POLICY-RESTRICTIONS*.
-                 (if (minusp index)
-                     (let ((byte-pos (* (lognot index) 2)))
-                       (ldb (byte 2 byte-pos)
-                            (policy-primary-qualities policy)))
-                     (let ((byte-pos (* index 2)))
-                       (ldb (byte 2 byte-pos)
-                            (policy-dependent-qualities policy))))
+                 (%%policy-quality policy index)
+                 ;; Otherwise take the adjusted quality.
                  (%policy-quality policy index)))))
 
 (defmethod print-object ((self policy) stream)
@@ -207,6 +204,7 @@ EXPERIMENTAL INTERFACE: Subject to change."
 (defglobal **baseline-policy** nil)
 ;; Baseline policy altered with (TYPE-CHECK 0)
 (defglobal **zero-typecheck-policy** nil)
+#-sb-xc-host (declaim (type policy **baseline-policy**))
 
 ;;; This is to be called early in cold init to set things up, and may
 ;;; also be called again later in cold init in order to reset default
@@ -226,11 +224,7 @@ EXPERIMENTAL INTERFACE: Subject to change."
 
   ;; CMU CL didn't use 1 as the default for everything,
   ;; but since ANSI says 1 is the ordinary value, we do.
-  (setf *policy* (copy-policy **baseline-policy**))
-  (setf *policy-restrictions* nil)
-  ;; not actually POLICY, but very similar
-  (setf *handled-conditions* nil
-        *disabled-package-locks* nil))
+  (setf *policy* (copy-policy **baseline-policy**)))
 
 ;;; Look up a named optimization quality in POLICY. This is only
 ;;; called by compiler code for known-valid QUALITY-NAMEs, e.g. SPEED;
@@ -251,29 +245,52 @@ EXPERIMENTAL INTERFACE: Subject to change."
          (t
           form)))
 
-;; Return the value for quality INDEX in POLICY.
-;; Primary qualities are assumed to exist, however policy-restricting functions
-;; can create a POLICY that indicates absence of primary qualities.
-;; This does not affect RESTRICT-COMPILER-POLICY because a lower bound of 0
-;; can be assumed for everything. SET-MACRO-POLICY might care though.
-(defun %policy-quality (policy index)
-  (declare (type policy policy)
-           (type (integer
-                  #.(- n-policy-primary-qualities)
-                  #.(- max-policy-qualities n-policy-primary-qualities 1))
-                 index))
-  (let ((floor *policy-restrictions*))
-    (macrolet ((quality-floor (get-byte)
-                 `(if floor (ldb (byte 2 byte-pos) (,get-byte floor)) 0)))
-      (if (minusp index)
-          (let ((byte-pos (* (lognot index) 2)))
-            (max (ldb (byte 2 byte-pos) (policy-primary-qualities policy))
-                 (quality-floor policy-primary-qualities)))
-          (let ((byte-pos (* index 2)))
-            (max (if (logbitp index (policy-presence-bits policy))
-                     (ldb (byte 2 byte-pos) (policy-dependent-qualities policy))
-                     1)
-                 (quality-floor policy-dependent-qualities)))))))
+(macrolet ((extract-field (floor-expression-primary
+                           floor-expression-dependent)
+             `(if (minusp index)
+                  (let ((byte-pos (* (lognot index) 2)))
+                    (max (ldb (byte 2 byte-pos)
+                              (policy-primary-qualities policy))
+                         ,floor-expression-primary))
+                  (let ((byte-pos (* index 2)))
+                    (max (if (logbitp index (policy-presence-bits policy))
+                             (ldb (byte 2 byte-pos)
+                                  (policy-dependent-qualities policy))
+                             1)
+                         ,floor-expression-dependent))))
+           (define-getter (name &body body)
+             `(defun ,name (policy index)
+                (declare (type policy policy)
+                         (type (integer
+                                #.(- n-policy-primary-qualities)
+                                #.(- max-policy-qualities
+                                     n-policy-primary-qualities 1))
+                               index))
+                ,@body)))
+
+  ;; Return the value for quality INDEX in POLICY, using *POLICY-RESTRICTIONS*
+  ;; Primary qualities are assumed to exist, however policy-restricting functions
+  ;; can create a POLICY that indicates absence of primary qualities.
+  ;; This does not affect RESTRICT-COMPILER-POLICY because a lower bound of 0
+  ;; can be assumed for everything. SET-MACRO-POLICY might care though.
+  (define-getter %policy-quality
+    (let ((floor *policy-restrictions*))
+      (macrolet ((quality-floor (get-byte)
+                   `(if floor (ldb (byte 2 byte-pos) (,get-byte floor)) 0)))
+        (extract-field (quality-floor policy-primary-qualities)
+                       (quality-floor policy-dependent-qualities)))))
+
+  ;; Return the unadjusted value for quality INDEX in POLICY.
+  ;; This is used for converting a policy to a list of elements for display
+  ;; and for verifying that after processing declarations, the new policy
+  ;; matches the given declarations, thus implying no ambiguity.
+  (define-getter %%policy-quality
+    (extract-field 0 0))) ; floor is always 0
+
+;;; Forward declaration of %COERCE-TO-POLICY.
+;;; Definition is in 'node' so that FUNCTIONAL and NODE types are defined.
+;;; Arg is declared of type T because the function explicitly checks it.
+(declaim (ftype (sfunction (t) policy) %coerce-to-policy))
 
 ;;; syntactic sugar for querying optimization policy qualities
 ;;;
@@ -348,14 +365,3 @@ EXPERIMENTAL INTERFACE: Subject to change."
   ;; But most probably the current behavior is entirely reasonable.
   (setq *macro-policy* (process-optimize-decl `(optimize ,@list)
                                               **baseline-policy**)))
-
-;; Turn the macro policy into an OPTIMIZE declaration for insertion
-;; into a macro body for DEFMACRO, MACROLET, or DEFINE-COMPILER-MACRO.
-;; Note that despite it being a style-warning to insert a duplicate,
-;; we need no precaution against that even though users may write
-;;  (DEFMACRO FOO (X) (DECLARE (OPTIMIZE (SAFETY 1))) ...)
-;; The expansion of macro-defining forms is such that the macro-policy
-;; appears in a different lexical scope from the user's declarations.
-(defun macro-policy-decls ()
-  (and *macro-policy*
-       `((declare (optimize ,@(policy-to-decl-spec *macro-policy*))))))

@@ -210,6 +210,19 @@ Options:
                   Use an existing CMU CL binary as a cross-compilation
                   host when you have weird things in your .cmucl-init
                   file.
+
+  --host-location=<string> Location of the source directory on compilation host
+
+      The string is passed to the command rsync to transfer the
+      necessary files between the target and host directories during
+      the make-target-*.sh steps of cross-compilation (cf. make.sh)
+
+      Examples:
+
+       user@host-machine:/home/user/sbcl
+                  Transfer the files to/from directory /home/user/sbcl
+                  on host-machine.
+
 EOF
   exit 1
 fi
@@ -632,6 +645,7 @@ if [ "$sbcl_arch" = "x86" ]; then
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :alien-callbacks :cycle-counter :inline-constants :precise-arg-count-error' >> $ltf
     printf ' :memory-barrier-vops :multiply-high-vops :ash-right-vops :symbol-info-vops' >> $ltf
+    printf ' :fp-and-pc-standard-save' >> $ltf
     case "$sbcl_os" in
     linux | freebsd | gnu-kfreebsd | netbsd | openbsd | sunos | darwin | win32 | dragonfly)
         printf ' :linkage-table' >> $ltf
@@ -648,7 +662,7 @@ if [ "$sbcl_arch" = "x86" ]; then
 elif [ "$sbcl_arch" = "x86-64" ]; then
     printf ' :gencgc :stack-grows-downward-not-upward :c-stack-is-control-stack :linkage-table' >> $ltf
     printf ' :compare-and-swap-vops :unwind-to-frame-and-call-vop :raw-instance-init-vops' >> $ltf
-    printf ' :interleaved-raw-slots :precise-arg-count-error' >> $ltf
+    printf ' :interleaved-raw-slots :precise-arg-count-error :fp-and-pc-standard-save' >> $ltf
     printf ' :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :alien-callbacks :cycle-counter :complex-float-vops' >> $ltf
@@ -721,6 +735,7 @@ elif [ "$sbcl_arch" = "arm" ]; then
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :stack-allocatable-vectors :stack-allocatable-closures' >> $ltf
     printf ' :precise-arg-count-error :unwind-to-frame-and-call-vop' >> $ltf
+    printf ' :fp-and-pc-standard-save' >> $ltf
 else
     # Nothing need be done in this case, but sh syntax wants a placeholder.
     echo > /dev/null

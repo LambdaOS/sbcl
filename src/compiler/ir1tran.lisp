@@ -721,29 +721,38 @@
 
 ;;; Find a compiler-macro for a form, taking FUNCALL into account.
 (defun find-compiler-macro (opname form)
-  (if (eq opname 'funcall)
-      (let ((fun-form (cadr form)))
-        (cond ((and (consp fun-form) (eq 'function (car fun-form))
-                    (not (cddr fun-form)))
-               (let ((real-fun (cadr fun-form)))
-                 (if (legal-fun-name-p real-fun)
-                     (values (sb!xc:compiler-macro-function real-fun *lexenv*)
-                             real-fun)
-                     (values nil nil))))
-              ((sb!xc:constantp fun-form *lexenv*)
-               (let ((fun (constant-form-value fun-form *lexenv*)))
-                 (if (legal-fun-name-p fun)
-                     ;; CLHS tells us that local functions must shadow
-                     ;; compiler-macro-functions, but since the call is
-                     ;; through a name, we are obviously interested
-                     ;; in the global function.
-                     (values (sb!xc:compiler-macro-function fun nil) fun)
-                     (values nil nil))))
-              (t
-               (values nil nil))))
-      (if (legal-fun-name-p opname)
-          (values (sb!xc:compiler-macro-function opname *lexenv*) opname)
-          (values nil nil))))
+  (flet ((legal-cm-name-p (name)
+           (and (legal-fun-name-p name)
+                (or (not (symbolp name))
+                    (not (sb!xc:macro-function name *lexenv*))))))
+    (if (eq opname 'funcall)
+        (let ((fun-form (cadr form)))
+          (cond ((and (consp fun-form) (eq 'function (car fun-form))
+                      (not (cddr fun-form)))
+                 (let ((real-fun (cadr fun-form)))
+                   (if (legal-cm-name-p real-fun)
+                       (values (sb!xc:compiler-macro-function real-fun *lexenv*)
+                               real-fun)
+                       (values nil nil))))
+                ((sb!xc:constantp fun-form *lexenv*)
+                 (let ((fun (constant-form-value fun-form *lexenv*)))
+                   (if (legal-cm-name-p fun)
+                       ;; CLHS tells us that local functions must shadow
+                       ;; compiler-macro-functions, but since the call is
+                       ;; through a name, we are obviously interested
+                       ;; in the global function.
+                       ;; KLUDGE: CLHS 3.2.2.1.1 also says that it can be
+                       ;; "a list whose car is funcall and whose cadr is
+                       ;; a list (function name)", that means that
+                       ;; (funcall 'name) that gets here doesn't fit the
+                       ;; definition.
+                       (values (sb!xc:compiler-macro-function fun nil) fun)
+                       (values nil nil))))
+                (t
+                 (values nil nil))))
+        (if (legal-fun-name-p opname)
+            (values (sb!xc:compiler-macro-function opname *lexenv*) opname)
+            (values nil nil)))))
 
 ;;; If FORM has a usable compiler macro, use it; otherwise return FORM itself.
 ;;; Return the name of the compiler-macro as a secondary value, if applicable.
@@ -1093,7 +1102,7 @@
           (if transform
               (multiple-value-bind (transformed pass)
                   (if (functionp transform)
-                      (funcall transform form)
+                      (funcall transform form *lexenv*)
                       (let ((result
                              (if (eq (cdr transform) :predicate)
                                  (and (singleton-p (cdr form))
@@ -1414,7 +1423,12 @@
         ((not var)
          ;; ANSI's definition for "Declaration IGNORE, IGNORABLE"
          ;; requires that this be a STYLE-WARNING, not a full WARNING.
-         (multiple-value-call #'compiler-style-warn
+         ;; But, other Lisp hosts signal a full warning, so when building
+         ;; the cross-compiler, compile it as #'WARN so that in a self-hosted
+         ;; build we can at least crash in the same way,
+         ;; until we resolve this question about how severe the warning is.
+         (multiple-value-call #+sb-xc-host #'warn
+                              #-sb-xc-host #'compiler-style-warn
            "~A declaration for ~A: ~A"
            (first spec)
            (if (symbolp name)
@@ -1627,8 +1641,7 @@
                 (process-it))
             ;; Kludge: EVAL calls this function to deal with LOCALLY.
               (process-it)))))
-    (advise-if-repeated-optimize-qualities
-     (lexenv-policy lexenv) optimize-qualities)
+    (warn-repeated-optimize-qualities (lexenv-policy lexenv) optimize-qualities)
     (values lexenv result-type *post-binding-variable-lexenv*)))
 
 (defun %processing-decls (decls vars fvars ctran lvar binding-form-p fun)

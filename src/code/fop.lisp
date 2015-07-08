@@ -142,6 +142,9 @@
 (!define-fop 3 (fop-truth) t)
 (!define-fop 4 (fop-push ((:operands index)))
   (ref-fop-table (fasl-input) index))
+(!define-fop 9 (fop-move-to-table (x))
+  (push-fop-table x (fasl-input))
+  x)
 
 ;;; CMU CL had FOP-POP-FOR-EFFECT as fop 65, but it was never used and seemed
 ;;; to have no possible use.
@@ -434,6 +437,7 @@
 (progn
   #+sb-xc-host
   (!define-fop 160 (fop-character-string ((:operands length)))
+    length ; touch the argument to avoid style-warning
     (bug "CHARACTER-STRING FOP encountered"))
 
   #-sb-xc-host
@@ -592,7 +596,8 @@ a bug.~@:>")
 
 (!define-fop 139 (fop-fun-entry (code-object name arglist type info))
   #+sb-xc-host ; since xc host doesn't know how to compile %PRIMITIVE
-  (error "FOP-FUN-ENTRY can't be defined without %PRIMITIVE.")
+  (progn code-object name arglist type info ; touch the arguments
+         (error "FOP-FUN-ENTRY can't be defined without %PRIMITIVE."))
   #-sb-xc-host
   (let ((offset (read-word-arg (fasl-input-stream))))
     (declare (type index offset))

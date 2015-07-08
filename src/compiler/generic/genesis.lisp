@@ -963,25 +963,53 @@ core and return a descriptor to it."
                    (error "~S is not the descriptor of a cold-layout" des)))
        (vector-from-core x)))
 
-(macrolet ((dsd-index-from-keyword (initarg slots)
-             `(let ((dsd (find ,initarg ,slots
-                               :test (lambda (x y)
-                                       (eq x (keywordicate (dsd-name y)))))))
-                (aver (eq (dsd-raw-type dsd) t)) ; raw slots not implemented
-                (+ (dsd-index dsd) sb!vm:instance-slots-offset))))
-
-  (defun write-slots (cold-object host-layout &rest assignments)
+(flet ((get-slots (host-layout-or-type)
+         (etypecase host-layout-or-type
+           (layout (dd-slots (layout-info host-layout-or-type)))
+           (symbol (dd-slots-from-core host-layout-or-type))))
+       (get-slot-index (slots initarg)
+         (+ sb!vm:instance-slots-offset
+            (if (descriptor-p slots)
+                (do ((dsd-layout (find-layout 'defstruct-slot-description))
+                     (slots slots (cold-cdr slots)))
+                    ((cold-null slots) (error "No slot for ~S" initarg))
+                  (let* ((dsd (cold-car slots))
+                         (slot-name (read-slot dsd dsd-layout :name)))
+                    (when (eq (keywordicate (warm-symbol slot-name)) initarg)
+                      (let ((raw-type (read-slot dsd dsd-layout :raw-type)))
+                        ;; Untagged slots are not accessible during cold-load.
+                        (aver (eq (warm-symbol raw-type) t)))
+                      (return (descriptor-fixnum
+                               (read-slot dsd dsd-layout :index))))))
+                (let ((dsd (find initarg slots
+                                 :test (lambda (x y)
+                                         (eq x (keywordicate (dsd-name y)))))))
+                  (aver (eq (dsd-raw-type dsd) t)) ; Same as above: no can do.
+                  (dsd-index dsd))))))
+  (defun write-slots (cold-object host-layout-or-type &rest assignments)
     (aver (evenp (length assignments)))
-    (let ((slots (dd-slots (layout-info host-layout))))
+    (let ((slots (get-slots host-layout-or-type)))
       (loop for (initarg value) on assignments by #'cddr
             do (write-wordindexed
-                cold-object (dsd-index-from-keyword initarg slots) value)))
+                cold-object (get-slot-index slots initarg) value)))
     cold-object)
 
-  (defun read-slot (cold-object host-layout slot-initarg) ; not "name"
-    (read-wordindexed cold-object
-                      (dsd-index-from-keyword
-                       slot-initarg (dd-slots (layout-info host-layout))))))
+  ;; For symmetry, the reader takes an initarg, not a slot name.
+  (defun read-slot (cold-object host-layout-or-type slot-initarg)
+    (let ((slots (get-slots host-layout-or-type)))
+      (read-wordindexed cold-object (get-slot-index slots slot-initarg)))))
+
+;; Given a TYPE-NAME of a structure-class, find its defstruct-description
+;; as a target descriptor, and return the slot list as a target descriptor.
+(defun dd-slots-from-core (type-name)
+  (let* ((host-dd-layout (find-layout 'defstruct-description))
+         (target-dd
+          ;; This is inefficient, but not enough so to worry about.
+          (or (car (assoc (cold-intern type-name) *known-structure-classoids*
+                          :key (lambda (x) (read-slot x host-dd-layout :name))
+                          :test #'descriptor=))
+              (error "No known layout for ~S" type-name))))
+    (read-slot target-dd host-dd-layout :slots)))
 
 (defvar *simple-vector-0-descriptor*)
 (defvar *vacuous-slot-table*)
@@ -1074,6 +1102,24 @@ core and return a descriptor to it."
 (defvar *cold-package-symbols*)
 (declaim (type hash-table *cold-package-symbols*))
 
+(setf (get 'find-package :sb-cold-funcall-handler/for-value)
+      (lambda (descriptor &aux (name (base-string-from-core descriptor)))
+        (or (car (gethash name *cold-package-symbols*))
+            (error "Genesis could not find a target package named ~S" name))))
+
+(defvar *classoid-cells*)
+(setf (get 'find-classoid-cell :sb-cold-funcall-handler/for-value)
+      (lambda (name &key create)
+        (aver (eq create t))
+        (or (gethash name *classoid-cells*)
+            (let ((layout (gethash 'sb!kernel::classoid-cell *cold-layouts*)))
+              (setf (gethash name *classoid-cells*)
+                    (write-slots (allocate-struct *dynamic* layout)
+                                 (find-layout 'sb!kernel::classoid-cell)
+                                 :name name
+                                 :pcl-class *nil-descriptor*
+                                 :classoid *nil-descriptor*))))))
+
 ;;; a map from descriptors to symbols, so that we can back up. The key
 ;;; is the address in the target core.
 (defvar *cold-symbols*)
@@ -1125,12 +1171,6 @@ core and return a descriptor to it."
       (dolist (pd package-data-list)
         (init-cold-package (sb-cold:package-data-name pd)
                            #!+sb-doc(sb-cold::package-data-doc pd)))
-      ;; MISMATCH needs !HAIRY-DATA-VECTOR-REFFER-INIT to have been done,
-      ;; and FIND-PACKAGE calls MISMATCH - which it shouldn't - but until
-      ;; that is fixed, doing this in genesis allows packages to be
-      ;; completely sane, modulo the naming, extremely early in cold-init.
-      (cold-set '*keyword-package* (find-cold-package "KEYWORD"))
-      (cold-set '*cl-package* (find-cold-package "COMMON-LISP"))
       ;; pass 2: set the 'use' lists and collect the 'used-by' lists
       (dolist (pd package-data-list)
         (let ((this (find-cold-package (sb-cold:package-data-name pd)))
@@ -1508,7 +1548,9 @@ core and return a descriptor to it."
                    cold-pkg-inits)))
     (cold-set 'sb!impl::*!initial-symbols* cold-pkg-inits))
 
-  (attach-fdefinitions-to-symbols)
+  (dump-symbol-info-vectors
+   (attach-fdefinitions-to-symbols
+    (attach-classoid-cells-to-symbols (make-hash-table :test #'eq))))
 
   (cold-set '*!reversed-cold-toplevels* *current-reversed-cold-toplevels*)
   (cold-set '*!initial-debug-sources* *current-debug-sources*)
@@ -1637,7 +1679,11 @@ core and return a descriptor to it."
 (defparameter *cold-fset-warm-names*
   (make-hash-table :test 'equal)) ; names can be conses, e.g. (SETF CAR)
 
-(defun cold-fset (name compiled-lambda docstring inline-expansion source-loc)
+(defun cold-fset (name compiled-lambda source-loc &optional inline-expansion)
+  ;; SOURCE-LOC can be ignored, because functions intrinsically store
+  ;; their location as part of the code component.
+  ;; The argument is supplied here only to provide context for
+  ;; a redefinition warning, which can't happen in cold load.
   (declare (ignore source-loc))
   (multiple-value-bind (cold-name warm-name)
       ;; (SETF f) was descriptorized when dumped, symbols were not,
@@ -1648,10 +1694,7 @@ core and return a descriptor to it."
     (when (gethash warm-name *cold-fset-warm-names*)
       (error "duplicate COLD-FSET for ~S" warm-name))
     (setf (gethash warm-name *cold-fset-warm-names*) t)
-    (target-push (cold-cons cold-name
-                           (if (or docstring inline-expansion)
-                               (cold-cons docstring inline-expansion)
-                               *nil-descriptor*))
+    (target-push (cold-cons cold-name inline-expansion)
                  '*!reversed-cold-defuns*)
     (static-fset cold-name compiled-lambda)))
 
@@ -1669,10 +1712,20 @@ core and return a descriptor to it."
           (error "Offset from FDEFN ~S to ~S is ~W, not ~W."
                  sym nil offset desired))))))
 
+(defun attach-classoid-cells-to-symbols (hashtable)
+  (let ((num (sb!c::meta-info-number (sb!c::meta-info :type :classoid-cell))))
+    ;; Iteration order is immaterial. The symbols will get sorted later.
+    (maphash (lambda (symbol cold-classoid-cell)
+               (setf (gethash symbol hashtable)
+                     (packed-info-insert
+                      (gethash symbol hashtable +nil-packed-infos+)
+                      sb!c::+no-auxilliary-key+ num cold-classoid-cell)))
+             *classoid-cells*))
+  hashtable)
+
 ;; Create pointer from SYMBOL and/or (SETF SYMBOL) to respective fdefinition
 ;;
-(defun attach-fdefinitions-to-symbols ()
-  (let ((hashtable (make-hash-table :test #'eq)))
+(defun attach-fdefinitions-to-symbols (hashtable)
     ;; Collect fdefinitions that go with one symbol, e.g. CAR and (SETF CAR),
     ;; using the host's code for manipulating a packed info-vector.
     (maphash (lambda (warm-name cold-fdefn)
@@ -1684,6 +1737,9 @@ core and return a descriptor to it."
                         (gethash key1 hashtable +nil-packed-infos+)
                         key2 +fdefn-info-num+ cold-fdefn))))
               *cold-fdefn-objects*)
+    hashtable)
+
+(defun dump-symbol-info-vectors (hashtable)
     ;; Emit in the same order symbols reside in core to avoid
     ;; sensitivity to the iteration order of host's maphash.
     (loop for (warm-sym . info)
@@ -1692,14 +1748,14 @@ core and return a descriptor to it."
           do (write-wordindexed
               (cold-intern warm-sym) sb!vm:symbol-info-slot
               ;; Each vector will have one fixnum, possibly the symbol SETF,
-              ;; and one or two #<fdefn> objects in it.
+              ;; and one or two #<fdefn> objects in it, and/or a classoid-cell.
               (vector-in-core
                      (map 'list (lambda (elt)
                                   (etypecase elt
                                     (symbol (cold-intern elt))
                                     (fixnum (make-fixnum-descriptor elt))
                                     (descriptor elt)))
-                          info))))))
+                          info)))))
 
 
 ;;;; fixups and related stuff
@@ -2468,7 +2524,10 @@ core and return a descriptor to it."
                (stack (%fasl-input-stack fasl-input)))
            (dotimes (i (read-byte-arg (%fasl-input-stream fasl-input))
                        (values (pop-fop-stack stack) args))
-             (push (pop-fop-stack stack) args)))))
+             (push (pop-fop-stack stack) args))))
+       (call (fun-name handler-name args)
+         (acond ((get fun-name handler-name) (apply it args))
+                (t (error "Can't ~S ~S in cold load" handler-name fun-name)))))
 
   (define-cold-fop (fop-funcall)
     (multiple-value-bind (fun args) (pop-args (fasl-input))
@@ -2480,8 +2539,7 @@ core and return a descriptor to it."
             (target-symbol-function (car args)))
            (cons (cold-cons (first args) (second args)))
            (symbol-global-value (cold-symbol-value (first args)))
-           (t
-            (error "Can't FUNCALL ~S in cold load" fun)))
+           (t (call fun :sb-cold-funcall-handler/for-value args)))
           (let ((counter *load-time-value-counter*))
             (cold-push (cold-list (cold-intern :load-time-value) fun
                                   (number-to-core counter))
@@ -2508,9 +2566,7 @@ core and return a descriptor to it."
                        (let ((val (second args)))
                          (if (symbolp val) (cold-intern val) val))))
             (%svset (apply 'cold-svset args))
-            (t (acond ((get fun :sb-cold-funcall-handler) (apply it args))
-                      (t (error "Can't FUNCALL-FOR-EFFECT ~S in cold load"
-                                fun)))))))))
+            (t (call fun :sb-cold-funcall-handler/for-effect args)))))))
 
 (defun finalize-load-time-value-noise ()
   (cold-set '*!load-time-values*
@@ -3552,6 +3608,7 @@ initially undefined function references:~2%")
                           (cons nil nil))))) ; (externals . internals)
            (*nil-descriptor* (make-nil-descriptor target-cl-pkg-info))
            (*known-structure-classoids* nil)
+           (*classoid-cells* (make-hash-table :test 'eq))
            (*current-reversed-cold-toplevels* *nil-descriptor*)
            (*current-debug-sources* *nil-descriptor*)
            (*unbound-marker* (make-other-immediate-descriptor

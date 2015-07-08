@@ -160,20 +160,30 @@
   *universal-type*)
 
 (deftransform array-in-bounds-p ((array &rest subscripts))
-  (flet ((give-up ()
-           (give-up-ir1-transform
-            "~@<lower array bounds unknown or negative and upper bounds not ~
-             negative~:@>"))
-         (bound-known-p (x)
-           (integerp x))) ; might be NIL or *
-    (block nil
-      (let ((dimensions (array-type-dimensions-or-give-up
-                         (lvar-conservative-type array))))
+  (block nil
+    (flet ((give-up (&optional reason)
+             (cond ((= (length subscripts) 1)
+                    (let ((arg (sb!xc:gensym)))
+                      `(lambda (array ,arg)
+                         (and (fixnump ,arg)
+                              (< ,arg (array-dimension array 0))))))
+                   (t
+                    (give-up-ir1-transform
+                     (or reason
+                         "~@<lower array bounds unknown or negative and upper bounds not ~
+                         negative~:@>")))))
+           (bound-known-p (x)
+             (integerp x)))             ; might be NIL or *
+      (let ((dimensions (catch-give-up-ir1-transform
+                            ((array-type-dimensions-or-give-up
+                              (lvar-conservative-type array))
+                             args)
+                          (give-up (car args)))))
         ;; Might be *. (Note: currently this is never true, because the type
         ;; derivation infers the rank from the call to ARRAY-IN-BOUNDS-P, but
         ;; let's keep this future proof.)
         (when (eq '* dimensions)
-          (give-up-ir1-transform "array bounds unknown"))
+          (give-up "array bounds unknown"))
         ;; shortcut for zero dimensions
         (when (some (lambda (dim)
                       (and (bound-known-p dim) (zerop dim)))
@@ -198,7 +208,7 @@
                       ;; does not give us a definite clue either.
                       (give-up))
                      ((and (bound-known-p high) (minusp high))
-                      (return nil))     ; definitely below lower bound (zero).
+                      (return nil)) ; definitely below lower bound (zero).
                      (t
                       (cons low high))))))
           (let* ((subscripts-bounds (mapcar #'subscript-bounds subscripts))
@@ -309,7 +319,7 @@
                          '*))
                  ,(cond ((constant-lvar-p dims)
                          (let* ((val (lvar-value dims))
-                                (cdims (if (listp val) val (list val))))
+                                (cdims (ensure-list val)))
                            (if simple
                                cdims
                                (length cdims))))
@@ -403,7 +413,7 @@
       (multiple-value-bind (new-dimensions rank)
           (flet ((constant-dims (dimensions)
                    (let* ((dims (constant-form-value dimensions env))
-                          (canon (if (listp dims) dims (list dims)))
+                          (canon (ensure-list dims))
                           (rank (length canon)))
                      (values (if (= rank 1)
                                  (list 'quote (car canon))

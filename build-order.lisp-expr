@@ -53,6 +53,9 @@
  ;; any forms referring to cross-compilation host internal functions
  ;; leaking into target SBCL code.
  ("src/code/backq")
+ ;; Naturally 'backq' generates a lot of calls to APPEND,
+ ;; the compiler-macro for which should be defined as soon as possible.
+ ("src/code/cmacros" :not-host)
 
  ;; It's difficult to be too early with a DECLAIM SPECIAL (or DEFVAR
  ;; or whatever) thanks to the sullenly-do-the-wrong-thing semantics
@@ -124,9 +127,9 @@
  ;; This has the BARRIER stuff that the threading support needs,
  ;; required for some code in 'early-extensions'
  ("src/code/barrier" :not-host)
- ("src/code/early-extensions") ; on host for COLLECT, SYMBOLICATE, etc.
  ("src/code/parse-body")       ; on host for PARSE-BODY
- ("src/code/parse-defmacro")   ; on host for PARSE-DEFMACRO
+ ("src/code/early-extensions") ; on host for COLLECT, SYMBOLICATE, etc.
+ ("src/compiler/parse-lambda-list")
  ("src/compiler/deftype")      ; on host for SB!XC:DEFTYPE
  ("src/code/restart" :not-host) ; %DEFCONSTANT can bind a restart
  ("src/compiler/defconstant")
@@ -318,6 +321,7 @@
 
  ("src/compiler/early-c")
  ("src/compiler/policy")
+ ("src/compiler/lexenv")
  ("src/compiler/policies")
 
  ;; ("src/code/defbangmacro" was here until sbcl-0.6.7.3.)
@@ -373,11 +377,6 @@
  ("src/code/condition" :not-host)
 
  ("src/compiler/generic/primtype")
-
- ;; the implementation of the compiler-affecting part of forms like
- ;; DEFMACRO and DEFTYPE; must be loaded before we can start
- ;; defining types
- ("src/compiler/parse-lambda-list")
 
  ;; for DEFSTRUCT ALIEN-TYPE, needed by host-type.lisp
  ("src/code/host-alieneval")
@@ -456,7 +455,6 @@
  ("src/code/readtable")
  ("src/code/pathname")
  ("src/code/host-pprint")
- ("src/compiler/lexenv")
 
  ;; KLUDGE: Much stuff above here is the type system and/or the INFO
  ;; system, not really the compiler proper. It might be easier to
@@ -524,6 +522,7 @@
  ("src/compiler/float-tran")
  ("src/compiler/saptran")
  ("src/compiler/srctran")
+ ("src/code/quantifiers")
  ("src/compiler/bitops-derive-type")
  ("src/compiler/generic/vm-tran")
  ("src/compiler/locall")

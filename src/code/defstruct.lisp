@@ -311,12 +311,6 @@
                              ,@(accessor-definitions dd)))
                 ;; This must be in the same lexical environment
                      ,@(constructor-definitions dd)
-                     ,@(when (eq (dd-pure dd) t)
-                         ;; Seems like %TARGET-DEFSTRUCT should do this
-                         `((locally
-                            (declare (notinline find-classoid))
-                            (setf (layout-pure (classoid-layout
-                                                (find-classoid ',name))) t))))
                      ,@print-method
                 ;; Various other operations only make sense on the target SBCL.
                      (%target-defstruct ',dd))))
@@ -1521,7 +1515,10 @@ or they must be declared locally notinline at each call site.~@:>")
 (defun create-boa-constructor (defstruct boa creator)
   (declare (type function creator))
   (multiple-value-bind (llks req opt rest keys aux)
-      (parse-lambda-list (second boa))
+      (parse-lambda-list (second boa)
+                         :accept
+                         (lambda-list-keyword-mask
+                            '(&optional &rest &key &allow-other-keys &aux)))
     (collect ((arglist)
               (vars)
               (skipped-vars)
@@ -1627,17 +1624,14 @@ or they must be declared locally notinline at each call site.~@:>")
             (arglist '&aux)
             (dolist (arg aux)
               (typecase arg
-                ((cons symbol (cons t null))
+                ((cons symbol cons)
                  (let ((var (first arg)))
                    (arglist arg)
                    (vars var)
                    (decls `(type ,(get-slot var) ,var))))
-                ((cons symbol null)
-                 (skipped-vars (first arg)))
-                (symbol
-                 (skipped-vars arg))
                 (t
-                 (error "Malformed &AUX binding specifier: ~s." arg)))))))
+                 ;; (&AUX X) and (&AUX (X)) both skip the slot
+                 (skipped-vars (if (consp arg) (first arg) arg))))))))
 
       (funcall creator defstruct (first boa)
                (arglist) (ftype-args) (decls)

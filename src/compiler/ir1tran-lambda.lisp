@@ -28,7 +28,7 @@
 (declaim (ftype (sfunction (t list &optional t) lambda-var) varify-lambda-arg))
 (defun varify-lambda-arg (name names-so-far &optional (context "lambda list"))
   (declare (inline member))
-  (unless (symbolp name)
+  (unless (symbolp name) ;; FIXME: probably unreachable. Change to AVER?
     (compiler-error "~S is not a symbol, and cannot be used as a variable." name))
   (when (member name names-so-far :test #'eq)
     (compiler-error "The variable ~S occurs more than once in the ~A."
@@ -87,7 +87,7 @@
 (declaim (ftype (sfunction (list) (values list boolean boolean list list))
                 make-lambda-vars))
 (defun make-lambda-vars (list)
-  (multiple-value-bind (llks required optional rest keys aux more-vars)
+  (multiple-value-bind (llks required optional rest/more keys aux)
       (parse-lambda-list list)
     (collect ((vars)
               (names-so-far)
@@ -103,11 +103,7 @@
                           (supplied-var (varify-lambda-arg supplied-p
                                                            (names-so-far))))
                      (setf (arg-info-supplied-p info) supplied-var)
-                     (names-so-far supplied-p)
-                     (when (> (length (the list spec)) 3)
-                       (compiler-error
-                        "The list ~S is too long to be an arg specifier."
-                        spec)))))))
+                     (names-so-far supplied-p))))))
 
         (dolist (name required)
           (let ((var (varify-lambda-arg name (names-so-far))))
@@ -129,23 +125,14 @@
                 (names-so-far name)
                 (parse-default spec info))))
 
-        (when rest
-          (let ((var (varify-lambda-arg (car rest) (names-so-far))))
-            (setf (lambda-var-arg-info var) (make-arg-info :kind :rest))
-            (vars var)
-            (names-so-far (lambda-var-%source-name var))))
-
-        (when more-vars
-          (let ((var (varify-lambda-arg (car more-vars) (names-so-far))))
-            (setf (lambda-var-arg-info var)
-                  (make-arg-info :kind :more-context))
-            (vars var)
-            (names-so-far (lambda-var-%source-name var)))
-          (let ((var (varify-lambda-arg (cadr more-vars) (names-so-far))))
-            (setf (lambda-var-arg-info var)
-                  (make-arg-info :kind :more-count))
-            (vars var)
-            (names-so-far (lambda-var-%source-name var))))
+        (when rest/more
+          (mapc (lambda (name kind)
+                  (let ((var (varify-lambda-arg name (names-so-far))))
+                    (setf (lambda-var-arg-info var) (make-arg-info :kind kind))
+                    (vars var)
+                    (names-so-far name)))
+                rest/more (let ((morep (eq (ll-kwds-restp llks) '&more)))
+                            (if morep '(:more-context :more-count) '(:rest)))))
 
         (dolist (spec keys)
           (cond
@@ -170,8 +157,6 @@
               (parse-default spec info)))
            (t
             (let ((head (first spec)))
-              (unless (proper-list-of-length-p head 2)
-                (error "malformed &KEY argument specifier: ~S" spec))
               (let* ((name (second head))
                      (var (varify-lambda-arg name (names-so-far)))
                      (info (make-arg-info
@@ -185,20 +170,12 @@
                 (parse-default spec info))))))
 
         (dolist (spec aux)
-          (cond ((atom spec)
-                 (let ((var (varify-lambda-arg spec nil)))
-                   (aux-vars var)
-                   (aux-vals nil)
-                   (names-so-far spec)))
-                (t
-                 (unless (proper-list-of-length-p spec 1 2)
-                   (compiler-error "malformed &AUX binding specifier: ~S"
-                                   spec))
-                 (let* ((name (first spec))
-                        (var (varify-lambda-arg name nil)))
-                   (aux-vars var)
-                   (aux-vals (second spec))
-                   (names-so-far name)))))
+          (multiple-value-bind (name val)
+              (if (atom spec) spec (values (car spec) (cadr spec)))
+            (let ((var (varify-lambda-arg name nil)))
+              (aux-vars var)
+              (aux-vals val)
+              (names-so-far name))))
 
         (values (vars) (ll-kwds-keyp llks) (ll-kwds-allowp llks)
                 (aux-vars) (aux-vals))))))
@@ -1134,27 +1111,20 @@
 ;;; return type is *, and each individual arguments type is T -- but we get
 ;;; the argument counts and keywords.
 (defun ftype-from-lambda-list (lambda-list)
-  (multiple-value-bind (llks req opt rest key-list aux more)
+  (multiple-value-bind (llks req opt rest key-list)
       (parse-lambda-list lambda-list)
-    (declare (ignore aux))
     (flet ((list-of-t (list) (mapcar (constantly t) list)))
       (let ((reqs (list-of-t req))
             (opts (when opt (cons '&optional (list-of-t opt))))
             ;; When it comes to building a type, &REST means pretty much the
             ;; same thing as &MORE.
-            (rest (when (or more rest) '(&rest t)))
+            (rest (when rest '(&rest t)))
             (keys (when (ll-kwds-keyp llks)
                     (cons '&key (mapcar (lambda (spec)
-                                          (let ((key/var (if (consp spec)
-                                                             (car spec)
-                                                             spec)))
-                                            (list (if (consp key/var)
-                                                      (car key/var)
-                                                      (keywordicate key/var))
-                                                  t)))
+                                          (list (parse-key-arg-spec spec) t))
                                         key-list))))
             (allow (when (ll-kwds-allowp llks) '(&allow-other-keys))))
-        (specifier-type `(function (,@reqs ,@opts ,@rest ,@keys ,@allow) *))))))
+        (compiler-specifier-type `(function (,@reqs ,@opts ,@rest ,@keys ,@allow) *))))))
 
 ;;; Get a DEFINED-FUN object for a function we are about to define. If
 ;;; the function has been forward referenced, then substitute for the

@@ -67,10 +67,6 @@
     (notinline . :notinline)
     (maybe-inline . :maybe-inline)))
 
-;;; the lexical environment we are currently converting in
-(defvar *lexenv*)
-(declaim (type lexenv *lexenv*))
-
 ;;; *FREE-VARS* translates from the names of variables referenced
 ;;; globally to the LEAF structures for them. *FREE-FUNS* is like
 ;;; *FREE-VARS*, only it deals with function names.
@@ -105,10 +101,6 @@
 (defvar *current-component*)
 (defvar *delayed-ir1-transforms*)
 (defvar *eval-tlf-index*)
-(defvar *handled-conditions*)
-(defvar *disabled-package-locks*)
-(defvar *policy*)
-(defvar *macro-policy* nil)
 (defvar *dynamic-counts-tn*)
 (defvar *elsewhere*)
 (defvar *event-info*)
@@ -120,7 +112,6 @@
   (defvar *constant-segment*)
   (defvar *constant-table*)
   (defvar *constant-vector*))
-(defvar *lexenv*)
 (defvar *source-info*)
 (defvar *source-plist*)
 (defvar *source-namestring*)
@@ -280,12 +271,3 @@ the stack without triggering overflow protection.")
           (bug "~S is a legal function name, and cannot be used as a ~
                 debug name." name))
         name))))
-
-;;; Some accessors to distinguish a parse of (values &optional) from (values)
-;;; and (lambda (x &key)) from (lambda (x)). If any lambda list keyword was seen
-;;; in the argument to PARSE-LAMBDA-LIST then it returns a cons of two booleans
-;;; signifying whether &KEY and &ALLOW-OTHER-KEYS were present.
-;;; Otherwise it returns NIL for absence of all lambda list keywords.
-(declaim (inline ll-kwds-keyp ll-kwds-allowp))
-(defun ll-kwds-keyp (x) (car x))
-(defun ll-kwds-allowp (x) (cdr x))

@@ -185,6 +185,7 @@ evaluated as a PROGN."
   (multiple-value-bind (forms decls doc) (parse-body body)
     (let* (;; stuff shared between LAMBDA and INLINE-LAMBDA and NAMED-LAMBDA
            (lambda-guts `(,args
+                          ,@(when doc (list doc))
                           ,@decls
                           (block ,(fun-name-block-name name)
                             ,@forms)))
@@ -206,13 +207,13 @@ evaluated as a PROGN."
          ,@(when (typep name '(cons (eql setf)))
              `((eval-when (:compile-toplevel :execute)
                  (sb!c::warn-if-setf-macro ',name))))
-         (%defun ',name ,named-lambda ,doc ',inline-lambda
-                 (sb!c:source-location))))))
+         (%defun ',name ,named-lambda (sb!c:source-location)
+                 ,@(and inline-lambda
+                        `(',inline-lambda)))))))
 
 #-sb-xc-host
-(progn (defun %defun (name def doc inline-lambda source-location)
+(progn (defun %defun (name def source-location &optional inline-lambda)
           (declare (type function def))
-          (declare (type (or null simple-string) doc))
           ;; should've been checked by DEFMACRO DEFUN
           (aver (legal-fun-name-p name))
           (sb!c:%compiler-defun name inline-lambda nil)
@@ -226,16 +227,13 @@ evaluated as a PROGN."
   ;; we frob any existing inline expansions.
           (sb!c::%set-inline-expansion name nil inline-lambda)
           (sb!c::note-name-defined name :function)
-          (when doc
-            (setf (%fun-doc def) doc))
           name)
        ;; During cold-init we don't touch the fdefinition.
-       (defun !%quietly-defun (name doc inline-lambda)
+       (defun !%quietly-defun (name inline-lambda)
          (sb!c:%compiler-defun name nil nil) ; makes :WHERE-FROM = :DEFINED
          (sb!c::%set-inline-expansion name nil inline-lambda)
          ;; and no need to call NOTE-NAME-DEFINED. It would do nothing.
-         (when doc
-           (setf (%fun-doc (fdefinition name)) doc))))
+         ))
 
 ;;;; DEFVAR and DEFPARAMETER
 
@@ -248,9 +246,12 @@ evaluated as a PROGN."
   `(progn
      (eval-when (:compile-toplevel)
        (%compiler-defvar ',var))
-     (%defvar ',var (unless (boundp ',var) ,val)
-              ',valp ,doc ',docp
-              (sb!c:source-location))))
+     (%defvar ',var
+              (sb!c:source-location)
+              ,@(and valp
+                     `((unless (boundp ',var) ,val)))
+              ,@(and docp
+                     `(,doc)))))
 
 (defmacro-mundanely defparameter (var val &optional (doc nil docp))
   #!+sb-doc
@@ -262,17 +263,19 @@ evaluated as a PROGN."
   `(progn
      (eval-when (:compile-toplevel)
        (%compiler-defvar ',var))
-     (%defparameter ',var ,val ,doc ',docp (sb!c:source-location))))
+     (%defparameter ',var ,val (sb!c:source-location)
+                    ,@(and docp
+                           `(,doc)))))
 
 (defun %compiler-defvar (var)
   (sb!xc:proclaim `(special ,var)))
 
 #-sb-xc-host
-(defun %defvar (var val valp doc docp source-location)
+(defun %defvar (var source-location &optional (val nil valp) (doc nil docp))
   (%compiler-defvar var)
-  (when valp
-    (unless (boundp var)
-      (set var val)))
+  (when (and valp
+             (not (boundp var)))
+    (set var val))
   (when docp
     (setf (fdocumentation var 'variable) doc))
   (sb!c:with-source-location (source-location)
@@ -280,7 +283,7 @@ evaluated as a PROGN."
   var)
 
 #-sb-xc-host
-(defun %defparameter (var val doc docp source-location)
+(defun %defparameter (var val source-location &optional (doc nil docp))
   (%compiler-defvar var)
   (set var val)
   (when docp
