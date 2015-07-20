@@ -163,6 +163,23 @@ the stack without triggering overflow protection.")
 (declaim (fixnum *type-cache-nonce*))
 (!defglobal *type-cache-nonce* 0)
 
+(def!struct (undefined-warning
+            #-no-ansi-print-object
+            (:print-object (lambda (x s)
+                             (print-unreadable-object (x s :type t)
+                               (prin1 (undefined-warning-name x) s))))
+            (:copier nil))
+  ;; the name of the unknown thing
+  (name nil :type (or symbol list))
+  ;; the kind of reference to NAME
+  (kind (missing-arg) :type (member :function :type :variable))
+  ;; the number of times this thing was used
+  (count 0 :type unsigned-byte)
+  ;; a list of COMPILER-ERROR-CONTEXT structures describing places
+  ;; where this thing was used. Note that we only record the first
+  ;; *UNDEFINED-WARNING-LIMIT* calls.
+  (warnings () :type list))
+
 ;;; Delete any undefined warnings for NAME and KIND. This is for the
 ;;; benefit of the compiler, but it's sometimes called from stuff like
 ;;; type-defining code which isn't logically part of the compiler.
@@ -239,6 +256,7 @@ the stack without triggering overflow protection.")
 (setf *debug-name-sharp* (make-debug-name-marker)
       *debug-name-ellipsis* (make-debug-name-marker))
 
+(declaim (ftype (sfunction () list) name-context))
 (defun debug-name (type thing &optional context)
   (let ((*debug-name-punt* nil))
     (labels ((walk (x)

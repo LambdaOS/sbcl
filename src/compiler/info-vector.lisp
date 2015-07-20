@@ -65,6 +65,9 @@
   ;; keys ... data ...
   )
 
+(declaim (ftype (sfunction (unsigned-byte)
+                           (unsigned-byte #.sb!vm:n-positive-fixnum-bits))
+                primify))
 (defun make-info-storage (n-cells-min &optional (load-factor .7))
   ;; If you ask for 40 entries at 50% load, you get (PRIMIFY 80) entries.
   (let* ((n-cells (primify (ceiling n-cells-min load-factor)))
@@ -79,6 +82,8 @@
     (fill a nil :start end)
     a))
 
+(declaim (ftype (sfunction (t) (unsigned-byte #.sb!vm:n-positive-fixnum-bits))
+                globaldb-sxhashoid))
 (defstruct (info-hashtable (:conc-name info-env-))
   (storage (make-info-storage 30) :type simple-vector)
   (comparator #'equal :type function)
@@ -98,10 +103,7 @@
 ;; or info-puthash, but that's fine because there's only one thread.
 (defmacro info-cas (storage index oldval newval)
   #+sb-xc-host
-  `(let ((actual-old (svref ,storage ,index)))
-     (if (eq actual-old ,oldval)
-         (progn (setf (svref ,storage ,index) ,newval) actual-old)
-         (error "xc bug. CAS expected ~S got ~S" actual-old ,oldval)))
+  `(xc-compare-and-swap-svref ,storage ,index ,oldval ,newval)
   #-sb-xc-host
   `(cas (svref ,storage ,index) ,oldval ,newval))
 
@@ -127,6 +129,11 @@
 ;; never present as a value.
 #+sb-xc-host
 (progn
+  (defun xc-compare-and-swap-svref (vector index old new)
+    (let ((actual-old (svref vector index)))
+      (if (eq old actual-old)
+          (progn (setf (svref vector index) new) old)
+          (error "xc bug. CAS expected ~S got ~S" old actual-old))))
   (defun make-info-forwarding-pointer (index) index)
   (defun info-forwarding-pointer-target (pointer) pointer)
   (defun info-value-moved-p (val) (fixnump val)))
@@ -502,17 +509,9 @@
 ;; A field is either a count of info-numbers, or an info-number.
 (declaim (inline packed-info-field))
 (defun packed-info-field (vector desc-index field-index)
-  ;; Should not need (THE INFO-NUMBER) however type inference
-  ;; seems borked during cross-compilation due to the shadowed LDB
-  ;; (see "don't watch:" in cold/defun-load-or-cload-xcompiler)
-  ;; and in particular it sees especially weird that this message appears
-  ;;    note: type assertion too complex to check:
-  ;;    (VALUES (UNSIGNED-BYTE 6) &REST T).
-  ;; because nothing here should be possibly-multiple-value-producing.
-  (the info-number
-    (ldb (byte info-number-bits
-               (* (the (mod #.+infos-per-word+) field-index) info-number-bits))
-         (the info-descriptor (svref vector desc-index)))))
+  (ldb (byte info-number-bits
+             (* (the (mod #.+infos-per-word+) field-index) info-number-bits))
+       (the info-descriptor (svref vector desc-index))))
 
 ;; Compute the number of elements needed to hold unpacked VECTOR after packing.
 ;; This is not "compute-packed-info-size" since that could be misconstrued
@@ -862,10 +861,6 @@
 ;; Search packed VECTOR for AUX-KEY and INFO-NUMBER, returning
 ;; the index of the data if found, or NIL if not found.
 ;;
-(declaim (ftype (function (simple-vector (or (eql 0) symbol) info-number)
-                          (or null index))
-                packed-info-value-index))
-
 (defun packed-info-value-index (vector aux-key type-num)
   (declare (optimize (safety 0))) ; vector bounds are AVERed
   (let ((data-idx (length vector)) (descriptor-idx 0) (field-idx 0))
@@ -1120,20 +1115,16 @@ This is interpreted as
 ;;; Some of this stuff might belong in 'symbol.lisp', but can't be,
 ;;; because 'symbol.lisp' is :NOT-HOST in build-order.
 
+;; In the target, UPDATE-SYMBOL-INFO is defined in 'symbol.lisp'.
 #+sb-xc-host
-;; SYMBOL-INFO is a primitive object accessor defined in 'objdef.lisp'
-;; and UPDATE-SYMBOL-INFO is defined in 'symbol.lisp'.
-;; But in the host Lisp, there is no such thing as a symbol-info slot,
-;; even if the host is SBCL. Instead, symbol-info is kept in the symbol-plist.
-(macrolet ((get-it () '(get symbol :sb-xc-globaldb-info)))
-  (defun symbol-info (symbol) (get-it))
-  (defun update-symbol-info (symbol update-fn)
-    ;; Never pass NIL to an update-fn. Pass the minimal info-vector instead,
-    ;; a vector describing 0 infos and 0 auxilliary keys.
-    (let ((newval (funcall update-fn (or (get-it) +nil-packed-infos+))))
-      (when newval
-        (setf (get-it) newval))
-      (values))))
+(defun update-symbol-info (symbol update-fn)
+  ;; Never pass NIL to an update-fn. Pass the minimal info-vector instead,
+  ;; a vector describing 0 infos and 0 auxilliary keys.
+  (let ((newval (funcall update-fn (or (symbol-info-vector symbol)
+                                       +nil-packed-infos+))))
+    (when newval
+      (setf (symbol-info-vector symbol) newval))
+    (values)))
 
 ;; Return the globaldb info for SYMBOL. With respect to the state diagram
 ;; presented at the definition of SYMBOL-PLIST, if the object in SYMBOL's
@@ -1142,11 +1133,13 @@ This is interpreted as
 ;; In terms of this function being named "-vector", implying always a vector,
 ;; it is understood that NIL is a proxy for +NIL-PACKED-INFOS+, a vector.
 ;;
-#!-symbol-info-vops (declaim (inline symbol-info-vector))
-(defun symbol-info-vector (symbol)
+#-sb-xc-host
+(progn
+ #!-symbol-info-vops (declaim (inline symbol-info-vector))
+ (defun symbol-info-vector (symbol)
   (let ((info-holder (symbol-info symbol)))
     (truly-the (or null simple-vector)
-               (if (listp info-holder) (cdr info-holder) info-holder))))
+               (if (listp info-holder) (cdr info-holder) info-holder)))))
 
 ;;; The current *INFO-ENVIRONMENT*, a structure of type INFO-HASHTABLE.
 ;;; Cheat by setting to nil before the type is proclaimed

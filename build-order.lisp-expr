@@ -81,9 +81,9 @@
  ;;; cross-compiler-only replacements for stuff which in target Lisp would be
  ;;; supplied by basic machinery
 
+ ("src/code/cross-byte"  :not-target)
  ("src/code/cross-misc"  :not-target)
  ("src/code/cross-char"  :not-target)
- ("src/code/cross-byte"  :not-target)
  ("src/code/cross-boole" :not-target)
  ("src/code/cross-float" :not-target)
  ("src/code/cross-io"    :not-target)
@@ -128,11 +128,12 @@
  ;; required for some code in 'early-extensions'
  ("src/code/barrier" :not-host)
  ("src/code/parse-body")       ; on host for PARSE-BODY
+ ("src/code/unportable-float")
+ ("src/compiler/policy")
  ("src/code/early-extensions") ; on host for COLLECT, SYMBOLICATE, etc.
  ("src/compiler/parse-lambda-list")
  ("src/compiler/deftype")      ; on host for SB!XC:DEFTYPE
  ("src/code/restart" :not-host) ; %DEFCONSTANT can bind a restart
- ("src/compiler/defconstant")
  ("src/code/early-alieneval")  ; for funs and vars needed at build and run time
 
  ("src/code/specializable-array")
@@ -159,20 +160,18 @@
  ;; Needed before the first use of WITH-SINGLE-PACKAGE-LOCKED-ERROR.
  ("src/code/early-package" :not-host)
 
+ ("src/compiler/defconstant")
+
  ("src/code/early-defstructs" :not-host) ; gotta-be-first DEFSTRUCTs
  ("src/code/early-raw-slots")
 
  ("src/code/defbangstruct")
 
- ("src/code/unportable-float")
-
  ("src/code/funutils" :not-host)
 
  ;; This needs DEF!STRUCT, and is itself needed early so that structure
  ;; accessors and inline functions defined here can be compiled inline
- ;; later. (Avoiding full calls not only increases efficiency, but also
- ;; avoids some cold init issues involving full calls to structure
- ;; accessors.)
+ ;; later. (Avoiding full calls increases efficiency)
  ("src/code/type-class")
 
  ("src/code/ansi-stream" :not-host)
@@ -199,16 +198,11 @@
  ;; FIXME: more informative and up-to-date comment?
  ("src/code/toplevel"    :not-host)
  ("src/code/cold-error"  :not-host)
+ ("src/pcl/slot-name") ; for calls from 'info-vector'
  ;; 'info-vector' is needed at least as early as 'fdefinition' so that the
  ;; inlined INFO-VECTOR-FDEFINITION is available to %COERCE-CALLABLE-TO-FUN.
  ("src/compiler/info-vector")
  ("src/code/fdefinition" :not-host)
-
- ;; In classic CMU CL, code/type was here. I've since split that into
- ;; lots of smaller pieces, some of which are here and some of which
- ;; are handled later in the sequence, when the cross-compiler is
- ;; built. -- WHN 19990620
- ("src/code/target-type" :not-host)
 
  ("src/code/pred" :not-host)
 
@@ -219,7 +213,6 @@
  ;; This needs DEFINE-ALIEN-ROUTINE from target-alieneval.
  ("src/code/misc-aliens" :not-host)
 
- ("src/code/typedefs")
  ("src/compiler/generic/vm-array")
  ("src/code/weak"          :not-host)
  ("src/code/array"         :not-host) ; needs WEAK-POINTER-VALUE
@@ -320,7 +313,6 @@
  ;;; convenient to stick them here)
 
  ("src/compiler/early-c")
- ("src/compiler/policy")
  ("src/compiler/lexenv")
  ("src/compiler/policies")
 
@@ -328,6 +320,7 @@
 
  ("src/compiler/macros")
 
+ ("src/compiler/fun-info")
  ("src/compiler/globaldb")
  ("src/compiler/info-functions")
 
@@ -339,6 +332,10 @@
 
  ;; for e.g. BLOCK-ANNOTATION, needed by "compiler/vop"
  ("src/compiler/node")
+
+ ;; This has ASSEMBLY-UNIT-related stuff needed by core.lisp.
+ ;; and LABEL, needed by IR2-NLX-INFO
+ ("src/compiler/early-assem")
 
  ;; for e.g. PRIMITIVE-TYPE, needed by "vmdef"
  ("src/compiler/vop")
@@ -396,6 +393,9 @@
  ;; and because they define
  ;;   * the function SPECIFIER-TYPE, which is used in fndb.lisp.
  ("src/code/late-type")
+ ;; Compile target-only stuff after all defglobals like *CONS-T-T-TYPE*
+ ;; and all type-classes are defined.
+ ("src/code/target-type" :not-host)
  ("src/code/pprint" :not-host)
  ("src/code/deftypes-for-target")
 
@@ -473,9 +473,6 @@
  ("src/compiler/generic/interr")
 
  ("src/compiler/bit-util")
-
- ;; This has ASSEMBLY-UNIT-related stuff needed by core.lisp.
- ("src/compiler/early-assem")
 
  ;; core.lisp contains DEFSTRUCT CORE-OBJECT, and "compiler/main.lisp"
  ;; does lots of (TYPEP FOO 'CORE-OBJECT), so it's nice to compile this

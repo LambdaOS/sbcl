@@ -286,6 +286,7 @@ with underscores replaced by dashes."
        *bidi-classes*
        (aref **character-misc-database** (1+ (misc-index character))))))
 
+(declaim (inline combining-class))
 (defun combining-class (character)
   #!+sb-doc
   "Returns the canonical combining class (CCC) of CHARACTER"
@@ -520,6 +521,7 @@ disappears when accents are placed on top of it. and NIL otherwise"
 
 
 ;;; Implements UAX#15: Normalization Forms
+(declaim (inline char-decomposition-info))
 (defun char-decomposition-info (char)
   (let ((value (aref **character-misc-database**
                      (+ 4 (misc-index char)))))
@@ -573,38 +575,43 @@ disappears when accents are placed on top of it. and NIL otherwise"
             (char-decomposition char info callback))
         (funcall callback char))))
 
-(defun decompose-string (string &optional (kind :canonical))
-  (let ((compatibility (ecase kind
-                         (:compatibility t)
-                         (:canonical nil))))
-    (let (chars
-          (length 0)
-          previous-char
-          (previous-combining-class 0))
-      (dx-flet ((callback (char)
-                  (let ((combining-class (combining-class char)))
-                    (incf length)
-                    (cond ((< 0 combining-class previous-combining-class)
-                           ;; Ensure it's sorted
-                           (loop for cons on chars
-                                 for next-char = (cadr cons)
-                                 when (or (not next-char)
-                                          (<= 0 (combining-class next-char) combining-class))
-                                 do (setf (cdr cons)
-                                          (cons char (cdr cons)))
-                                    (return)))
-                          (t
-                           (push char chars)
-                           (setf previous-char char
-                                 previous-combining-class combining-class))))))
-        (loop for char across string
-              do
-              (decompose-char char compatibility #'callback))
-        (let ((result (make-string length)))
-          (loop for char in (nreverse chars)
-                for i from 0
-                do (setf (schar result i) char))
-          result)))))
+(defun decompose-string (string compatibility filter)
+  (let (chars
+        (length 0)
+        (previous-combining-class 0))
+    (declare (type index length))
+    (dx-flet ((callback (char)
+                        (let ((combining-class (combining-class char)))
+                          (incf length)
+                          (cond ((< 0 combining-class previous-combining-class)
+                                 ;; Ensure it's sorted
+                                 (loop for cons on chars
+                                       for next-char = (cadr cons)
+                                       when (or (not next-char)
+                                                (<= 0 (combining-class next-char) combining-class))
+                                       do (setf (cdr cons)
+                                                (cons char (cdr cons)))
+                                          (return)))
+                                (t
+                                 (push char chars)
+                                 (setf previous-combining-class combining-class))))))
+      (sb!kernel:with-array-data ((string string) (start) (end))
+        (declare (ignore start))
+        (let ((calback (if filter
+                           (let ((filter (sb!kernel:%coerce-callable-to-fun filter)))
+                             (lambda (char)
+                               (when (funcall filter char)
+                                 (callback char))))
+                           #'callback)))
+          (loop for i below end
+                for char = (schar string i)
+                do
+                (decompose-char char compatibility calback))))
+      (let ((result (make-string length)))
+        (loop for char in chars
+              for i from (1- length) downto 0
+              do (setf (schar result i) char))
+        result))))
 
 (defun composition-hangul-syllable-type (cp)
   (cond
@@ -727,11 +734,16 @@ disappears when accents are placed on top of it. and NIL otherwise"
         string
         (lstring result))))
 
-(defun normalize-string (string &optional (form :nfd))
+(defun normalize-string (string &optional (form :nfd)
+                                          filter)
   #!+sb-doc
   "Normalize STRING to the Unicode normalization form form.
-   Acceptable values for form are :NFD, :NFC, :NFKD, and :NFKC"
+Acceptable values for form are :NFD, :NFC, :NFKD, and :NFKC.
+If FILTER is a function it is called on each decomposed character and
+only characters for which it returns T are collected."
   (declare (type (member :nfd :nfkd :nfc :nfkc) form))
+  #!-sb-unicode
+  (declare (ignore filter))
   #!-sb-unicode
   (etypecase string
     ((array nil (*)) string)
@@ -745,13 +757,13 @@ disappears when accents are placed on top of it. and NIL otherwise"
     ((array character (*))
      (ecase form
        ((:nfc)
-        (canonically-compose (decompose-string string)))
+        (canonically-compose (decompose-string string nil filter)))
        ((:nfd)
-        (decompose-string string))
+        (decompose-string string nil filter))
        ((:nfkc)
-        (canonically-compose (decompose-string string :compatibility)))
+        (canonically-compose (decompose-string string t filter)))
        ((:nfkd)
-        (decompose-string string :compatibility))))
+        (decompose-string string t filter))))
     ((array nil (*)) string)))
 
 (defun normalized-p (string &optional (form :nfd))

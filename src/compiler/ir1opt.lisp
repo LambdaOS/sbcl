@@ -28,6 +28,13 @@
            ;; check for EQL types and singleton numeric types
            (values (type-singleton-p (lvar-type thing))))))
 
+;;; Same as above except for EQL types
+(defun strictly-constant-lvar-p (thing)
+  (declare (type (or lvar null) thing))
+  (and (lvar-p thing)
+       (let ((use (principal-lvar-use thing)))
+         (and (ref-p use) (constant-p (ref-leaf use))))))
+
 ;;; Return the constant value for an LVAR whose only use is a constant
 ;;; node.
 (declaim (ftype (function (lvar) t) lvar-value))
@@ -1750,7 +1757,13 @@
                    (multiple-value-bind (pdest pprev)
                        (principal-lvar-end lvar)
                      (declare (ignore pdest))
-                     (lvar-single-value-p pprev))))
+                     (lvar-single-value-p pprev))
+                   ;; CASTs can disappear, don't substitute if
+                   ;; DEST-LVAR has other uses (this will be
+                   ;; insufficient if we have a CAST-CAST chain, but
+                   ;; works well for a single CAST)
+                   (or (null dest-lvar)
+                       (atom (lvar-uses dest-lvar)))))
              (mv-combination
               (or (eq (basic-combination-fun dest) lvar)
                   (and (eq (basic-combination-kind dest) :local)

@@ -671,12 +671,12 @@
   (def 5)
   (def 6))
 
-(defmacro !define-hash-cache (name args
-                             &key hash-function hash-bits memoizer
-                                  (values 1))
+(defmacro !define-hash-cache (name args aux-vars
+                              &key hash-function hash-bits memoizer
+                              flush-function (values 1))
   (declare (ignore memoizer))
   (dolist (arg args)
-    (unless (= (length arg) 2)
+    (unless (<= 2 (length arg) 3)
       (error "bad argument spec: ~S" arg)))
   (assert (typep hash-bits '(integer 5 14))) ; reasonable bounds
   (let* ((fun-name (symbolicate name "-MEMO-WRAPPER"))
@@ -691,57 +691,71 @@
          (entry (make-symbol "LINE"))
          (thunk (make-symbol "THUNK"))
          (arg-vars (mapcar #'first args))
-         (result-temps (loop for i from 1 to values
-                             collect (make-symbol (format nil "RES~D" i))))
+         (nvalues (if (listp values) (length values) values))
+         (result-temps
+          (if (listp values)
+              values ; use the names provided by the user
+              (loop for i from 1 to nvalues ; else invent some names
+                    collect (make-symbol (format nil "R~D" i)))))
          (temps (append (mapcar (lambda (x) (make-symbol (string x)))
                                 arg-vars)
                         result-temps))
-         (tests (mapcar (lambda (arg temp) ; -> (EQx ARG #:ARG)
-                          `(,(cadr arg) ,(car arg) ,temp))
+         ;; Mnemonic: (FIND x SEQ :test #'f) calls f with x as the LHS
+         (tests (mapcar (lambda (spec temp) ; -> (EQx ARG #:ARG)
+                          `(,(cadr spec) ,(car spec) ,temp))
                         args temps))
          (cache-type `(simple-vector ,size))
-         (line-type (let ((n (+ nargs values)))
+         (line-type (let ((n (+ nargs nvalues)))
                       (if (<= n 3) 'cons `(simple-vector ,n))))
-         (binds
-          (case (length temps)
-            (2 `((,(first temps) (car ,entry))
-                 (,(second temps) (cdr ,entry))))
-            (3 (let ((arg-temp (sb!xc:gensym "ARGS")))
-                 `((,arg-temp (cdr ,entry))
-                   (,(first temps) (car ,entry))
-                   (,(second temps) (car (truly-the cons ,arg-temp)))
-                   (,(third temps) (cdr ,arg-temp)))))
-            (t (loop for i from 0 for x in temps
-                     collect `(,x (svref ,entry ,i))))))
+         (bind-hashval
+          `((,hashval (the (signed-byte #.sb!vm:n-fixnum-bits)
+                           (funcall ,hash-function ,@arg-vars)))
+            (,cache ,var-name)))
+         (probe-it
+          (lambda (ignore action)
+            `(when ,cache
+               (let ((,hashval ,hashval) ; gets clobbered in probe loop
+                     (,cache (truly-the ,cache-type ,cache)))
+                 ;; FIXME: redundant?
+                 (declare (type (signed-byte #.sb!vm:n-fixnum-bits) ,hashval))
+                 (loop repeat 2
+                    do (let ((,entry
+                              (svref ,cache
+                                     (ldb (byte ,hash-bits 0) ,hashval))))
+                         (unless (eql ,entry 0)
+                           ;; This barrier is a no-op on all multi-threaded SBCL
+                           ;; architectures. No CPU except Alpha will move a
+                           ;; load prior to a load on which it depends.
+                           (sb!thread:barrier (:data-dependency))
+                           (locally (declare (type ,line-type ,entry))
+                             (let* ,(case (length temps)
+                                     (2 `((,(first temps) (car ,entry))
+                                          (,(second temps) (cdr ,entry))))
+                                     (3 (let ((arg-temp (sb!xc:gensym "ARGS")))
+                                          `((,arg-temp (cdr ,entry))
+                                            (,(first temps) (car ,entry))
+                                            (,(second temps)
+                                             (car (truly-the cons ,arg-temp)))
+                                            (,(third temps) (cdr ,arg-temp)))))
+                                     (t (loop for i from 0 for x in temps
+                                              collect `(,x (svref ,entry ,i)))))
+                               ,@ignore
+                               (when (and ,@tests) ,action))))
+                         (setq ,hashval (ash ,hashval ,(- hash-bits)))))))))
          (fun
-          `(defun ,fun-name (,thunk ,@arg-vars)
+          `(defun ,fun-name (,thunk ,@arg-vars ,@aux-vars)
              ,@(when *profile-hash-cache* ; count seeks
                  `((when (boundp ',statistics-name)
                      (incf (aref ,statistics-name 0)))))
-             (let ((,hashval (the (signed-byte #.sb!vm:n-fixnum-bits)
-                                  (funcall ,hash-function ,@arg-vars)))
-                   (,cache ,var-name))
-               (when ,cache
-                 (let ((,hashval ,hashval))
-                   (declare (type (signed-byte #.sb!vm:n-fixnum-bits) ,hashval))
-                   (loop repeat 2 do
-                     (let ((,entry (svref (truly-the ,cache-type ,cache)
-                                          (ldb (byte ,hash-bits 0) ,hashval))))
-                       (unless (eql ,entry 0)
-                         ;; This barrier is a no-op on all multi-threaded SBCL
-                         ;; architectures. No CPU except Alpha will move a read
-                         ;; prior to a read on which it depends.
-                         (sb!thread:barrier (:data-dependency))
-                         (locally (declare (type ,line-type ,entry))
-                           (let* ,binds
-                             (when (and ,@tests)
-                               (return-from ,fun-name
-                                 (values ,@result-temps))))))
-                       (setq ,hashval (ash ,hashval ,(- hash-bits)))))))
+             (let ,bind-hashval
+               ,(funcall probe-it nil
+                         `(return-from ,fun-name (values ,@result-temps)))
                (multiple-value-bind ,result-temps (funcall ,thunk)
                  (let ((,entry
-                        (,(hash-cache-line-allocator (+ nargs values))
-                         ,@arg-vars ,@result-temps))
+                        (,(hash-cache-line-allocator (+ nargs nvalues))
+                         ,@(mapcar (lambda (spec) (or (caddr spec) (car spec)))
+                                   args)
+                         ,@result-temps))
                        (,cache
                         (truly-the ,cache-type
                          (or ,cache (alloc-hash-cache ,size ',var-name))))
@@ -771,6 +785,14 @@
              (defvar ,statistics-name)))
        (declaim (type (or null ,cache-type) ,var-name))
        (defun ,(symbolicate name "-CACHE-CLEAR") () (setq ,var-name nil))
+       ,@(when flush-function
+           `((defun ,flush-function ,arg-vars
+               (let ,bind-hashval
+                 ,(funcall probe-it
+                   `((declare (ignore ,@result-temps)))
+                   `(return (setf (svref ,cache
+                                         (ldb (byte ,hash-bits 0) ,hashval))
+                                  0)))))))
        (declaim (inline ,fun-name))
        ,fun)))
 
@@ -785,17 +807,37 @@
 ;;;   attempt cache lookup, and on miss, execute the body code and
 ;;;   insert into the cache.
 ;;;   Manual control over memoization is useful if there are cases for
-;;;   which computing the result is simpler than cache lookup.
+;;;   which it is undesirable to pollute the cache.
 
+;;; FIXME: this macro holds onto the DEFINE-HASH-CACHE macro,
+;;; but should not.
+;;;
+;;; Possible FIXME: if the function has a type proclamation, it forces
+;;; a type-check every time the cache finds something. Instead, values should
+;;; be checked once only when inserted into the cache, and not when read out.
+;;;
+;;; N.B.: it is not obvious that the intended use of an explicit MEMOIZE macro
+;;; is to call it exactly once or not at all. If you call it more than once,
+;;; then you inline all of its logic every time. Probably the code generated
+;;; by DEFINE-HASH-CACHE should be an FLET inside the body of DEFUN-CACHED,
+;;; but the division of labor is somewhat inverted at present.
+;;; Since we don't have caches that aren't in direct support of DEFUN-CACHED
+;;; - did we ever? - this should be possible to change.
+;;;
 (defmacro defun-cached ((name &rest options &key
                               (memoizer (make-symbol "MEMOIZE")
                                         memoizer-supplied-p)
                               &allow-other-keys)
                         args &body body-decls-doc)
   (binding* (((forms decls doc) (parse-body body-decls-doc))
-             (arg-names (mapcar #'car args)))
+             ((inputs aux-vars)
+              (let ((aux (member '&aux args)))
+                (if aux
+                    (values (ldiff args aux) aux)
+                    (values args nil))))
+             (arg-names (mapcar #'car inputs)))
     `(progn
-        (!define-hash-cache ,name ,args ,@options)
+        (!define-hash-cache ,name ,inputs ,aux-vars ,@options)
         (defun ,name ,arg-names
           ,@decls
           ,@(if doc (list doc))
@@ -1226,6 +1268,10 @@
         :runtime-error runtime-error))
 
 (defun deprecated-function (since name replacements &optional doc)
+  (declare (ignorable since name replacements doc))
+  #+sb-xc-host
+  (error "Can't define deprecated functions on the host")
+  #-sb-xc-host
   (let ((closure
          ;; setting the name is mildly redundant since the closure captures
          ;; its name. However %FUN-DOC can't make use of that fact.
@@ -1238,6 +1284,8 @@
       (setf (%fun-doc closure) doc))
     closure))
 
+;; Note: Naming a lambda does not work on the host, so we can't actually
+;; detect deprecated functions.
 (defun deprecation-compiler-macro (state since name replacements)
   ;; this lambda's name is significant - see DEPRECATED-THING-P
   (named-lambda .deprecation-warning. (form env)
@@ -1247,8 +1295,11 @@
 
 ;; Return the stage of deprecation of thing identified by KIND and NAME, or NIL.
 (defun deprecated-thing-p (kind name)
+  (declare (ignorable kind name))
   (ecase kind
     (:function
+     ;; This can't work on the host due to CLOSUREP,%FUN-NAME, etc.
+     #-sb-xc-host
      (let ((macro-fun (info :function :compiler-macro-function name)))
        (and (closurep macro-fun)
             (eq (%fun-name macro-fun) '.deprecation-warning.)
@@ -1394,20 +1445,6 @@
      #!+sb-doc
      (setf (fdocumentation ',name 'variable)
            ,(print-deprecation-message name since (list replacement)))))
-
-;;; Anaphoric macros
-(defmacro awhen (test &body body)
-  `(let ((it ,test))
-     (when it ,@body)))
-
-(defmacro acond (&rest clauses)
-  (if (null clauses)
-      `()
-      (destructuring-bind ((test &body body) &rest rest) clauses
-        (once-only ((test test))
-          `(if ,test
-               (let ((it ,test)) (declare (ignorable it)),@body)
-               (acond ,@rest))))))
 
 ;; Given DECLS as returned by from parse-body, and SYMBOLS to be bound
 ;; (with LET, MULTIPLE-VALUE-BIND, etc) return two sets of declarations:
@@ -1639,6 +1676,8 @@ to :INTERPRET, an interpreter will be used.")
        (file-position stream pos)
        (file-position stream))))
 
+(declaim (ftype (function (t &optional t) (values cons &optional))
+                line/col-from-charpos))
 (defun stream-error-position-info (stream &optional position)
   (when (and (not position) (form-tracking-stream-p stream))
     (let ((line/col (line/col-from-charpos stream)))

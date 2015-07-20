@@ -1,11 +1,26 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
 changes relative to sbcl-1.2.13:
-  * DESTRUCTURING-BIND has been totally reimplemented from scratch
-    to address a handful of performance and correctness issues.
+  * enhancement: DESTRUCTURING-BIND has been totally reimplemented from
+    scratch to address a handful of performance and correctness issues.
     Some minor behavioral differences exist regarding order of evaluation
     of default forms for unsupplied &OPTIONAL and &KEY arguments
     when nested destructuring patterns are involved.
     (lp#707556, lp#707573, lp#707578, lp#708051)
+  * enhancement: DEFCONSTANT and DEFSTRUCT respect package locks. (lp#1186238,
+    lp#1036716)
+  * enhancement: sb-unicode:normalize-string has a new optional argument,
+    FILTER, a callback which controls which decomposed characters are
+    collected. Useful for stripping away diacritics more efficiently.
+  * bug fix: (TYPE-OF ARRAY) for a non-simple array is subject to change
+    after a call of ADJUST-ARRAY. (lp#1333731)
+  * bug fix: Dynamic-extent allocation with a loop between allocating a value
+    and the start of its environment no longer discards the allocated data
+    when the loop is taken. (lp#1472785)
+  * bug fix: Variable-reference elimination no longer generates incorrect code
+    under certain circumstances. (lp#1446891)
+  * bug fix: variables with EQL types are no longer treated as constants by
+    VOPs, which caused problems with closures being allocated for such
+    variables, but they remained unused. (lp#1390149)
 
 changes in sbcl-1.2.13 relative to sbcl-1.2.12:
   * incompatible change: on success, TRY-SEMAPHORE and WAIT-ON-SEMAPHORE
@@ -16,7 +31,7 @@ changes in sbcl-1.2.13 relative to sbcl-1.2.12:
   * enhancement: On Windows DBG_PRINTEXCEPTION_C is handled and its message is
     printed. (lp#1437947)
   * bug-fix: TRUENAME works properly on broken symlinks presented as
-    directories. (lp#1458164)
+    directories. (lp#1400003)
   * bug fix: Inlined DPB and DEPOSIT-FIELD don't interfere with left-to-right
     order of argument evaluation. (lp#1458190)
   * bug fix: (SETF (LDB (BYTE 1 2 JUNK) X) 0) is rightly rejected.
