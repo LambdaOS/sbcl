@@ -170,6 +170,14 @@
     (sockopt-reuse-address s))
   t)
 
+(deftest* (simple-sockopt-test)
+  ;; test we can set SO_REUSEPORT on a socket and retrieve it, and in
+  ;; the process that all the weird macros in sockopt happened right.
+  (let ((s (make-instance 'inet-socket :type :stream :protocol (get-protocol-by-name "tcp"))))
+    (setf (sockopt-reuse-port s) t)
+    (sockopt-reuse-port s))
+  t)
+
 (defun read-buf-nonblock (buffer stream)
   "Like READ-SEQUENCE, but returns early if the full quantity of data isn't there to be read.  Blocks if no input at all"
   (let ((eof (gensym)))
@@ -401,7 +409,7 @@
              (let ((s (make-instance 'inet-socket
                                      :type :stream
                                      :protocol :tcp)))
-               (setf (sockopt-reuse-address s) t)
+               (setf (sockopt-reuse-port s) t)
                (socket-bind s (make-inet-address "127.0.0.1") 0)
                (socket-listen s 5)
                (multiple-value-bind (* port)
@@ -438,7 +446,7 @@
            (,server-socket-var))
       (unwind-protect
            (progn
-             (setf (sockopt-reuse-address ,listen-socket) t)
+             (setf (sockopt-reuse-port ,listen-socket) t)
              (socket-bind ,listen-socket (make-inet-address "127.0.0.1") 0)
              (socket-listen ,listen-socket 5)
              (socket-connect ,client-socket-var (make-inet-address "127.0.0.1")

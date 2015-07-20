@@ -133,7 +133,9 @@ Code for options that not every system has should be conditionalised:
     ,features ,info))
 
 (define-socket-option-bool
-  sockopt-reuse-address sockint::sol-socket sockint::so-reuseaddr)
+    sockopt-reuse-address sockint::sol-socket sockint::so-reuseaddr)
+(define-socket-option-bool
+    sockopt-reuse-port sockint::sol-socket sockint::so-reuseport)
 (define-socket-option-bool
   sockopt-keep-alive sockint::sol-socket sockint::so-keepalive)
 (define-socket-option-bool
