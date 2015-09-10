@@ -28,7 +28,16 @@
 ;;; This condition is signalled whenever we make a UNKNOWN-TYPE so that
 ;;; compiler warnings can be emitted as appropriate.
 (define-condition parse-unknown-type (condition)
-  ((specifier :reader parse-unknown-type-specifier :initarg :specifier)))
+  ((specifier :reader parse-unknown-type-specifier :initarg :specifier))
+  (:default-initargs
+   :specifier (missing-arg)))
+
+;;; This condition is signalled whenever we encounter a type (DEFTYPE,
+;;; structure, condition, class) that has been marked as deprecated.
+(define-condition parse-deprecated-type (condition)
+  ((specifier :reader parse-deprecated-type-specifier :initarg :specifier))
+  (:default-initargs
+   :specifier (missing-arg)))
 
 ;;; These functions are used as method for types which need a complex
 ;;; subtypep method to handle some superclasses, but cover a subtree
@@ -128,14 +137,6 @@
 ;;;;    parsing it.
 ;;;; -- Many of the places that can be annotated with real types can
 ;;;;    also be annotated with function or values types.
-
-;;; the description of a &KEY argument
-(defstruct (key-info #-sb-xc-host (:pure t)
-                     (:copier nil))
-  ;; the key (not necessarily a keyword in ANSI Common Lisp)
-  (name (missing-arg) :type symbol :read-only t)
-  ;; the type of the argument value
-  (type (missing-arg) :type ctype :read-only t))
 
 (!define-type-method (values :simple-subtypep :complex-subtypep-arg1)
                      (type1 type2)
@@ -804,7 +805,7 @@
   If values are T and T, type1 definitely is a subtype of type2.
   If values are NIL and T, type1 definitely is not a subtype of type2.
   If values are NIL and NIL, it couldn't be determined."
-  (declare (ignore environment))
+  (declare (type lexenv-designator environment) (ignore environment))
   (csubtypep (specifier-type type1) (specifier-type type2)))
 
 ;;; If two types are definitely equivalent, return true. The second
@@ -1199,6 +1200,23 @@
            (aver (not yes))
            (not surep))))))
 
+(defun cons-type-length-info (type)
+  (declare (type cons-type type))
+  (do ((min 1 (1+ min))
+       (cdr (cons-type-cdr-type type) (cons-type-cdr-type cdr)))
+      ((not (cons-type-p cdr))
+       (cond
+         ((csubtypep cdr (specifier-type 'null))
+          (values min t))
+         ((csubtypep *universal-type* cdr)
+          (values min nil))
+         ((type/= (type-intersection (specifier-type 'cons) cdr) *empty-type*)
+          (values min nil))
+         ((type/= (type-intersection (specifier-type 'null) cdr) *empty-type*)
+          (values min t))
+         (t (values min :maybe))))
+    ()))
+
 (!define-type-method (named :complex-=) (type1 type2)
   (cond
     ((and (eq type2 *empty-type*)
@@ -1465,7 +1483,7 @@
 
 (!define-type-method (hairy :simple-intersection2 :complex-intersection2)
                      (type1 type2)
-  (cond ((type= type1 type2)
+ (acond ((type= type1 type2)
          type1)
         ((eq type2 *satisfies-keywordp-type*)
          ;; (AND (MEMBER A) (SATISFIES KEYWORDP)) is possibly non-empty
@@ -1476,20 +1494,21 @@
              *empty-type*
              (multiple-value-bind (answer certain)
                  (types-equal-or-intersect type1 (specifier-type 'symbol))
-               (if (and (not answer) certain)
-                   *empty-type*
-                   nil))))
+               (and (not answer) certain *empty-type*))))
         ((eq type2 *fun-name-type*)
          (multiple-value-bind (answer certain)
              (types-equal-or-intersect type1 (specifier-type 'symbol))
-           (if (and (not answer) certain)
-               (multiple-value-bind (answer certain)
-                   (types-equal-or-intersect type1 (specifier-type 'cons))
-                 (if (and (not answer) certain)
-                     *empty-type*
-                     nil))
-               nil)))
-        (t nil)))
+           (and (not answer)
+                certain
+                (multiple-value-bind (answer certain)
+                    (types-equal-or-intersect type1 (specifier-type 'cons))
+                  (and (not answer) certain *empty-type*)))))
+        ((and (typep (hairy-type-specifier type2) '(cons (eql satisfies)))
+              (info :function :predicate-truth-constraint
+                    (cadr (hairy-type-specifier type2))))
+         (multiple-value-bind (answer certain)
+             (types-equal-or-intersect type1 (specifier-type it))
+           (and (not answer) certain *empty-type*)))))
 
 (!define-type-method (hairy :simple-union2)
                      (type1 type2)
@@ -1658,7 +1677,7 @@
          (nseltype (array-type-specialized-element-type ntype))
          (neltype (array-type-element-type ntype)))
     (if (and (eql ndims '*) (null ncomplexp)
-             (eql neltype *wild-type*) (eql nseltype *wild-type*))
+             (eq neltype *wild-type*) (eq nseltype *wild-type*))
         (make-array-type (array-type-dimensions type1)
                          :complexp t
                          :element-type (array-type-element-type type1)
@@ -2850,8 +2869,7 @@ used for a COMPLEX component.~:@>"
         (apply #'type-intersection
                (if (xset-empty-p xset)
                    *universal-type*
-                   (make-negation-type
-                    :type (make-member-type :xset xset)))
+                   (make-negation-type :type (make-member-type xset nil)))
                (mapcar
                 (lambda (x)
                   (let* ((opposite (neg-fp-zero x))
@@ -2860,7 +2878,7 @@ used for a COMPLEX component.~:@>"
                      (make-negation-type
                       :type (modified-numeric-type type :low nil :high nil))
                      (modified-numeric-type type :low nil :high (list opposite))
-                     (make-member-type :members (list opposite))
+                     (make-eql-type opposite)
                      (modified-numeric-type type :low (list opposite) :high nil))))
                 fp-zeroes))
         ;; Easy case
@@ -2905,10 +2923,10 @@ used for a COMPLEX component.~:@>"
         (t (values nil t))))
 
 (!define-type-method (member :simple-intersection2) (type1 type2)
-  (make-member-type :xset (xset-intersection (member-type-xset type1)
-                                             (member-type-xset type2))
-                    :fp-zeroes (intersection (member-type-fp-zeroes type1)
-                                             (member-type-fp-zeroes type2))))
+  (make-member-type (xset-intersection (member-type-xset type1)
+                                       (member-type-xset type2))
+                    (intersection (member-type-fp-zeroes type1)
+                                  (member-type-fp-zeroes type2))))
 
 (!define-type-method (member :complex-intersection2) (type1 type2)
   (block punt
@@ -2926,16 +2944,16 @@ used for a COMPLEX component.~:@>"
        type2)
       (if (and (xset-empty-p xset) (not fp-zeroes))
           *empty-type*
-          (make-member-type :xset xset :fp-zeroes fp-zeroes)))))
+          (make-member-type xset fp-zeroes)))))
 
 ;;; We don't need a :COMPLEX-UNION2, since the only interesting case is
 ;;; a union type, and the member/union interaction is handled by the
 ;;; union type method.
 (!define-type-method (member :simple-union2) (type1 type2)
-  (make-member-type :xset (xset-union (member-type-xset type1)
-                                      (member-type-xset type2))
-                    :fp-zeroes (union (member-type-fp-zeroes type1)
-                                      (member-type-fp-zeroes type2))))
+  (make-member-type (xset-union (member-type-xset type1)
+                                (member-type-xset type2))
+                    (union (member-type-fp-zeroes type1)
+                           (member-type-fp-zeroes type2))))
 
 (!define-type-method (member :simple-=) (type1 type2)
   (let ((xset1 (member-type-xset type1))
@@ -2962,21 +2980,16 @@ used for a COMPLEX component.~:@>"
       (let (ms numbers char-codes)
         (dolist (m (remove-duplicates members))
           (typecase m
-            (float (if (zerop m)
-                       (push m ms)
-                       (push (ctype-of m) numbers)))
-            (real (push (ctype-of m) numbers))
             (character (push (sb!xc:char-code m) char-codes))
+            (real (if (and (floatp m) (zerop m))
+                      (push m ms)
+                      (push (ctype-of m) numbers)))
             (t (push m ms))))
         (apply #'type-union
-               (if ms
-                   (make-member-type :members ms)
-                   *empty-type*)
-              (if char-codes
-                  (make-character-set-type
-                   :pairs (mapcar (lambda (x) (cons x x))
-                                  (sort char-codes #'<)))
-                  *empty-type*)
+               (member-type-from-list ms)
+               (make-character-set-type
+                :pairs (mapcar (lambda (x) (cons x x))
+                               (sort char-codes #'<)))
                (nreverse numbers)))
       *empty-type*))
 
@@ -3648,7 +3661,7 @@ used for a COMPLEX component.~:@>"
                              (add-to-xset elt xset)))))
                    x-type)
                   (unless (and (xset-empty-p xset) (not fp-zeroes))
-                    (res (make-member-type :xset xset :fp-zeroes fp-zeroes))))
+                    (res (make-member-type xset fp-zeroes))))
                 (dolist (y-type y-types (res x-type))
                   (multiple-value-bind (val win) (csubtypep x-type y-type)
                     (unless win (return-from type-difference nil))

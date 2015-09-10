@@ -326,7 +326,7 @@ terminating the main thread would terminate the entire process. If
 ALLOW-EXIT is true, aborting the main thread is equivalent to calling
 SB-EXT:EXIT code 1 and :ABORT NIL.
 
-Invoking the initial ABORT restart estabilished by MAKE-THREAD is
+Invoking the initial ABORT restart established by MAKE-THREAD is
 equivalent to calling ABORT-THREAD in other than main threads.
 However, whereas ABORT restart may be rebound, ABORT-THREAD always
 unwinds the entire thread. (Behaviour of the initial ABORT restart for
@@ -1603,9 +1603,12 @@ subject to change."
         (error 'join-thread-error :thread thread :problem problem))))
 
 (defun destroy-thread (thread)
-  #!+sb-doc
-  "Deprecated. Same as TERMINATE-THREAD."
   (terminate-thread thread))
+
+#-sb-xc-host
+(declaim (sb!ext:deprecated
+          :late ("SBCL" "1.2.15")
+          (function destroy-thread :replacement terminate-thread)))
 
 #!+sb-thread
 (defun enter-foreign-callback (arg1 arg2 arg3)
@@ -1920,11 +1923,10 @@ mechanism for inter-thread communication."
 ;;;; Stepping
 
 (defun thread-stepping ()
-  (make-lisp-obj
-   (sap-ref-word (current-thread-sap)
-                 (* sb!vm::thread-stepping-slot sb!vm:n-word-bytes))))
+  (sap-ref-lispobj (current-thread-sap)
+                   (* sb!vm::thread-stepping-slot sb!vm:n-word-bytes)))
 
 (defun (setf thread-stepping) (value)
-  (setf (sap-ref-word (current-thread-sap)
-                      (* sb!vm::thread-stepping-slot sb!vm:n-word-bytes))
-        (get-lisp-obj-address value)))
+  (setf (sap-ref-lispobj (current-thread-sap)
+                         (* sb!vm::thread-stepping-slot sb!vm:n-word-bytes))
+        value))

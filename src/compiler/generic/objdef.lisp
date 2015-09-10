@@ -417,6 +417,7 @@
                        :special *alien-stack-pointer*)
   (binding-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
                          :special *binding-stack-pointer*)
+  (stepping)
   ;; END of slots to keep near the beginning.
 
   ;; These aren't accessed (much) from Lisp, so don't really care
@@ -424,17 +425,18 @@
   (alien-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
   (binding-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
                        :special *binding-stack-start*)
+
   #!+sb-thread
   (os-attr :c-type "pthread_attr_t *" :length #!+alpha 2 #!-alpha 1)
-  #!+sb-thread
+  #!+(and sb-thread (not sb-safepoint))
   (state-sem :c-type "os_sem_t *" :length #!+alpha 2 #!-alpha 1)
-  #!+sb-thread
+  #!+(and sb-thread (not sb-safepoint))
   (state-not-running-sem :c-type "os_sem_t *" :length #!+alpha 2 #!-alpha 1)
-  #!+sb-thread
+  #!+(and sb-thread (not sb-safepoint))
   (state-not-running-waitcount :c-type "int" :length 1)
-  #!+sb-thread
+  #!+(and sb-thread (not sb-safepoint))
   (state-not-stopped-sem :c-type "os_sem_t *" :length #!+alpha 2 #!-alpha 1)
-  #!+sb-thread
+  #!+(and sb-thread (not sb-safepoint))
   (state-not-stopped-waitcount :c-type "int" :length 1)
   (control-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
                        :special *control-stack-start*)
@@ -450,7 +452,6 @@
   (tls-cookie)                          ;  on x86, the LDT index
   (interrupt-data :c-type "struct interrupt_data *"
                   :length #!+alpha 2 #!-alpha 1)
-  (stepping)
   ;; For various reasons related to pseudo-atomic and interrupt
   ;; handling, we need to know if the machine context is in Lisp code
   ;; or not.  On non-threaded targets, this is a global variable in
@@ -467,8 +468,6 @@
   (control-stack-pointer :c-type "lispobj *")
   #!+mach-exception-handler
   (mach-port-name :c-type "mach_port_name_t")
-  (nonpointer-data :c-type "struct nonpointer_thread_data *" :length #!+alpha 2 #!-alpha 1)
-  #!+(and sb-safepoint x86) (selfptr :c-type "struct thread *")
   ;; Context base pointer for running on top of system libraries built using
   ;; -fomit-frame-pointer.  Currently truly required and implemented only
   ;; for (and win32 x86-64), but could be generalized to other platforms if

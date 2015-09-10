@@ -648,8 +648,8 @@
             (lambda ()
               (handler-bind ((error #'(lambda (cond)
                                         (princ cond)
-                                        (sb-debug:backtrace
-                                         most-positive-fixnum))))
+                                        (sb-debug:print-backtrace
+                                         :count most-positive-fixnum))))
                 (loop (check-interrupt-count
                        (counter-n *interrupt-counter*))))))))
     (let ((func (lambda ()
@@ -936,7 +936,7 @@
 (defun oops (e)
   (setf *errors* e)
   (format t "~&oops: ~A in ~S~%" e *current-thread*)
-  (sb-debug:backtrace)
+  (sb-debug:print-backtrace)
   (catch 'done))
 
 (with-test (:name (:unsynchronized-hash-table)
@@ -1252,7 +1252,7 @@
                                  (lambda ()
                                    (dotimes (i 1000)
                                      (with-output-to-string (*debug-io*)
-                                       (sb-debug::backtrace 10))))))))
+                                       (sb-debug:print-backtrace :count 10))))))))
     (wait-for-threads threads)))
 
 (format t "backtrace test done~%")
@@ -1495,27 +1495,23 @@
       (assert (equal '(:ok :ok) res)))))
 
 (with-test (:name :spinlock-api)
-  (let* ((warned 0)
-         (funs
-           (handler-bind ((sb-int:early-deprecation-warning (lambda (_)
-                                                              (declare (ignore _))
-                                                              (incf warned))))
-             (list (compile nil `(lambda (lock)
-                                   (sb-thread::with-spinlock (lock)
-                                     t)))
-                   (compile nil `(lambda ()
-                                   (sb-thread::make-spinlock :name "foo")))
-                   (compile nil `(lambda (lock)
-                                   (sb-thread::get-spinlock lock)))
-                   (compile nil `(lambda (lock)
-                                   (sb-thread::release-spinlock lock)))))))
-    (assert (eql 4 warned))
-    (handler-bind ((warning #'error))
-      (destructuring-bind (with make get release) funs
-        (let ((lock (funcall make)))
-          (funcall get lock)
-          (funcall release lock)
-          (assert (eq t (funcall with lock))))))))
+  (handler-bind ((warning #'error))
+    (destructuring-bind (with make get release)
+        (assert-signal
+         (list (compile nil `(lambda (lock)
+                               (sb-thread::with-spinlock (lock)
+                                 t)))
+               (compile nil `(lambda ()
+                               (sb-thread::make-spinlock :name "foo")))
+               (compile nil `(lambda (lock)
+                               (sb-thread::get-spinlock lock)))
+               (compile nil `(lambda (lock)
+                               (sb-thread::release-spinlock lock))))
+         early-deprecation-warning 4)
+      (let ((lock (funcall make)))
+        (funcall get lock)
+        (funcall release lock)
+        (assert (eq t (funcall with lock)))))))
 
 (with-test (:name :interrupt-io-unnamed-pipe)
   (let (result)

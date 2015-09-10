@@ -40,13 +40,12 @@
 ;;;;  (incf (buffer-tail buffer) n))
 ;;;;
 
-(declaim (inline buffer-sap buffer-length buffer-head buffer-tail
-                 (setf buffer-head) (setf buffer-tail)))
 (defstruct (buffer (:constructor %make-buffer (sap length)))
   (sap (missing-arg) :type system-area-pointer :read-only t)
   (length (missing-arg) :type index :read-only t)
   (head 0 :type index)
   (tail 0 :type index))
+(declaim (freeze-type buffer))
 
 (defvar *available-buffers* ()
   #!+sb-doc
@@ -2208,7 +2207,7 @@
            (let ((posn (sb!unix:unix-lseek (fd-stream-fd stream)
                                            offset origin)))
              ;; CLHS says to return true if the file-position was set
-             ;; succesfully, and NIL otherwise. We are to signal an error
+             ;; successfully, and NIL otherwise. We are to signal an error
              ;; only if the given position was out of bounds, and that is
              ;; dealt with above. In times past we used to return NIL for
              ;; errno==ESPIPE, and signal an error in other cases.

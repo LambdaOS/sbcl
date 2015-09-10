@@ -144,6 +144,7 @@
 (defmacro make-dchunk (value)
   `(the dchunk ,value))
 
+#-sb-xc-host ;; FIXME: function belongs in 'target-disassem'
 (defun sap-ref-dchunk (sap byte-offset byte-order)
   (declare (type sb!sys:system-area-pointer sap)
            (type offset byte-offset)
@@ -1545,7 +1546,11 @@
   ;; a sap pointing to our segment
   (segment-sap nil :type (or null sb!sys:system-area-pointer))
   ;; the current segment
-  (segment nil :type (or null segment))
+  ;; But this makes no sense: SEGMENT is defined in 'target-disassem'
+  ;; which means the host can't use an instance of DISASSEM-STATE.
+  ;; Why is this structure defined at all?
+  ;; Perhaps the entire disassembler should be target-only.
+  (segment nil :type (or null #-sb-xc-host segment))
   ;; what to align to in most cases
   (alignment sb!vm:n-word-bytes :type alignment)
   (byte-order :little-endian

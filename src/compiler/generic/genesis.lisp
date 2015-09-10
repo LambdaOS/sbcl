@@ -882,6 +882,10 @@ core and return a descriptor to it."
                     #!+sb-thruption
                     sb!sys:*thruption-pending*))
 
+;;; Symbol print names are coalesced by string=.
+;;; This is valid because it is an error to modify a print name.
+(defvar *symbol-name-strings* (make-hash-table :test 'equal))
+
 ;;; Allocate (and initialize) a symbol.
 (defun allocate-symbol (name &key (gspace *dynamic*))
   (declare (simple-string name))
@@ -891,7 +895,9 @@ core and return a descriptor to it."
     (write-wordindexed symbol sb!vm:symbol-hash-slot (make-fixnum-descriptor 0))
     (write-wordindexed symbol sb!vm:symbol-info-slot *nil-descriptor*)
     (write-wordindexed symbol sb!vm:symbol-name-slot
-                       (base-string-to-core name *dynamic*))
+                       (or (gethash name *symbol-name-strings*)
+                           (setf (gethash name *symbol-name-strings*)
+                                 (base-string-to-core name *dynamic*))))
     (write-wordindexed symbol sb!vm:symbol-package-slot *nil-descriptor*)
     symbol))
 
@@ -1059,12 +1065,16 @@ core and return a descriptor to it."
     (setf (gethash (descriptor-bits result) *cold-layout-names*) name
           (gethash name *cold-layouts*) result)))
 
-;; This is called to backpatch two small sets of objects:
+;; This is called to backpatch three small sets of objects:
 ;;  - layouts which are made before layout-of-layout is made (4 of them)
 ;;  - packages, which are made before layout-of-package is made (all of them)
+;;  - a small number of classoid-cells (probably 3 or 4).
 (defun patch-instance-layout (thing layout)
   ;; Layout pointer is in the word following the header
   (write-wordindexed thing sb!vm:instance-slots-offset layout))
+
+(defun cold-layout-of (cold-struct)
+  (read-wordindexed cold-struct sb!vm:instance-slots-offset))
 
 (defun initialize-layouts ()
   (clrhash *cold-layouts*)
@@ -1092,8 +1102,7 @@ core and return a descriptor to it."
       (dolist (layout (list t-layout s-o-layout s!o-layout *layout-layout*))
         (patch-instance-layout layout *layout-layout*))
       (setf *package-layout*
-            (chill-layout 'package ; *NOT* SB!XC:PACKAGE, or you lose
-                          t-layout s-o-layout s!o-layout)))))
+            (chill-layout 'package t-layout s-o-layout)))))
 
 ;;;; interning symbols in the cold image
 
@@ -1112,10 +1121,12 @@ core and return a descriptor to it."
       (lambda (name &key create)
         (aver (eq create t))
         (or (gethash name *classoid-cells*)
-            (let ((layout (gethash 'sb!kernel::classoid-cell *cold-layouts*)))
+            (let ((layout (gethash 'sb!kernel::classoid-cell *cold-layouts*))
+                  (host-layout (find-layout 'sb!kernel::classoid-cell)))
               (setf (gethash name *classoid-cells*)
-                    (write-slots (allocate-struct *dynamic* layout)
-                                 (find-layout 'sb!kernel::classoid-cell)
+                    (write-slots (allocate-struct *dynamic* layout
+                                                  (layout-length host-layout))
+                                 host-layout
                                  :name name
                                  :pcl-class *nil-descriptor*
                                  :classoid *nil-descriptor*))))))
@@ -1713,9 +1724,20 @@ core and return a descriptor to it."
                  sym nil offset desired))))))
 
 (defun attach-classoid-cells-to-symbols (hashtable)
-  (let ((num (sb!c::meta-info-number (sb!c::meta-info :type :classoid-cell))))
+  (let ((num (sb!c::meta-info-number (sb!c::meta-info :type :classoid-cell)))
+        (layout (gethash 'sb!kernel::classoid-cell *cold-layouts*)))
+    (when (plusp (hash-table-count *classoid-cells*))
+      (aver layout))
     ;; Iteration order is immaterial. The symbols will get sorted later.
     (maphash (lambda (symbol cold-classoid-cell)
+               ;; Some classoid-cells are dumped before the cold layout
+               ;; of classoid-cell has been made, so fix those cases now.
+               ;; Obviously it would be better if, in general, ALLOCATE-STRUCT
+               ;; knew when something later must backpatch a cold layout
+               ;; so that it could make a note to itself to do those ASAP
+               ;; after the cold layout became known.
+               (when (cold-null (cold-layout-of cold-classoid-cell))
+                 (patch-instance-layout cold-classoid-cell layout))
                (setf (gethash symbol hashtable)
                      (packed-info-insert
                       (gethash symbol hashtable +nil-packed-infos+)
@@ -3116,14 +3138,14 @@ core and return a descriptor to it."
   ;; Assembly code needs only the constants for UNDEFINED_[ALIEN_]FUN_ERROR
   ;; but to avoid imparting that knowledge here, we'll expose all error
   ;; number constants except for OBJECT-NOT-<x>-ERROR ones.
-  (loop for interr across sb!c:*backend-internal-errors*
+  (loop for interr across sb!c:+backend-internal-errors+
         for i from 0
         when (stringp (car interr))
         do (format t "#define ~A ~D~%" (c-symbol-name (cdr interr)) i))
   ;; C code needs strings for describe_internal_error()
   (format t "#define INTERNAL_ERROR_NAMES ~{\\~%~S~^, ~}~2%"
           (map 'list 'sb!kernel::!c-stringify-internal-error
-               sb!c:*backend-internal-errors*))
+               sb!c:+backend-internal-errors+))
 
   ;; I'm not really sure why this is in SB!C, since it seems
   ;; conceptually like something that belongs to SB!VM. In any case,
@@ -3736,7 +3758,7 @@ initially undefined function references:~2%")
                          layout
                          sb!c::compiled-debug-info
                          sb!c::compiled-debug-fun
-                         sb!xc:package))
+                         package))
           (out-to
            (string-downcase (string class))
            (write-structure-object

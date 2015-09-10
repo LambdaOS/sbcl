@@ -1,5 +1,36 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
-changes relative to sbcl-1.2.13:
+changes relative to sbcl-1.2.15:
+  * enhancement: by default, timers with a repeat interval do not "catch up"
+    by repeatedly calling their function after a clock discontinuity such as a
+    suspend and resume cycle
+  * bug fix: correctly restore multiple values on the stack in the presence of
+    alien calls. (lp#1489590)
+
+changes in sbcl-1.2.15 relative to sbcl-1.2.14:
+  * new feature: DEPRECATION declaration for functions, variables and types
+    causes {EARLY,LATE,FINAL}-DEPRECATION-WARNING to be signaled when subject
+    of the declaration is used. Integrated with DESCRIBE, DOCUMENTATION and
+    SB-CLTL2:{VARIABLE,FUNCTION}-INFORMATION. Documented in the "Deprecation"
+    section of the manual.
+  * enhancement: ASDF updated to 3.1.5. (lp#1476867)
+  * enhancement: definitions within PROGN get proper source locations when
+    compiled (needs latest Slime to take advantage of this). (lp#1473147)
+  * enhancement: source locations for DEFCLASS slots now point directly to the
+    slot definitions, not the whole DEFCLASS form.
+  * bug fix: better source location in the presence of quoted forms.
+    (lp#1370561)
+  * bug fix: better source locations inside backqoute. (lp#1361502)
+  * bug fix: HANDLER-BIND requires that the handler-function be
+    a function designator at the time of binding establishment. (lp#1480679)
+  * bug fix: inlined functions surrounded by nested macrolets are properly
+    inlined. (lp#309123)
+
+changes in sbcl-1.2.14 relative to sbcl-1.2.13:
+  * minor incompatible change: The name of a compiled anonymous lambda
+    as returned by the third value of FUNCTION-LAMBDA-EXPRESSION can have
+    a lambda-list-like list following the introductory LAMBDA that is not
+    in general a syntactically valid lambda list. Specifically, it won't
+    retain default values, supplied-p variables, or &KEY or &AUX bindings.
   * enhancement: DESTRUCTURING-BIND has been totally reimplemented from
     scratch to address a handful of performance and correctness issues.
     Some minor behavioral differences exist regarding order of evaluation
@@ -21,6 +52,8 @@ changes relative to sbcl-1.2.13:
   * bug fix: variables with EQL types are no longer treated as constants by
     VOPs, which caused problems with closures being allocated for such
     variables, but they remained unused. (lp#1390149)
+  * bug fix: Windows installer generates registry key name
+    correctly. (lp#1476447)
 
 changes in sbcl-1.2.13 relative to sbcl-1.2.12:
   * incompatible change: on success, TRY-SEMAPHORE and WAIT-ON-SEMAPHORE

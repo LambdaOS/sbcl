@@ -18,19 +18,21 @@
 (defknown coerce (t type-specifier) t
     ;; Note:
     ;; This is not FLUSHABLE because it's defined to signal errors.
-    (movable)
+    (movable explicit-check)
   ;; :DERIVE-TYPE RESULT-TYPE-SPEC-NTH-ARG 2 ? Nope... (COERCE 1 'COMPLEX)
   ;; returns REAL/INTEGER, not COMPLEX.
   )
-(defknown list-to-vector* (list type-specifier) vector)
-(defknown vector-to-vector* (vector type-specifier) vector)
+;; These each check their input sequence for type-correctness,
+;; but not the output type specifier, because MAKE-SEQUENCE will do that.
+(defknown list-to-vector* (list type-specifier) vector (explicit-check))
+(defknown vector-to-vector* (vector type-specifier) vector (explicit-check))
 
 (defknown type-of (t) t (foldable flushable))
 
 ;;; These can be affected by type definitions, so they're not FOLDABLE.
 (defknown (sb!xc:upgraded-complex-part-type sb!xc:upgraded-array-element-type)
     (type-specifier &optional lexenv-designator) type-specifier
-    (unsafely-flushable))
+    (unsafely-flushable explicit-check))
 
 ;;;; from the "Predicates" chapter:
 
@@ -58,7 +60,7 @@
    ;;
    ;; (UPGRADED-ARRAY-ELEMENT-TYPE and UPGRADED-COMPLEX-PART-TYPE have
    ;; behavior like SUBTYPEP in this respect, not like TYPEP.)
-   (foldable))
+   (foldable explicit-check))
 (defknown subtypep (type-specifier type-specifier &optional lexenv-designator)
   (values boolean boolean)
   ;; This is not FOLDABLE because its value is affected by type
@@ -66,12 +68,12 @@
   ;;
   ;; FIXME: Is it OK to fold this when the types have already been
   ;; defined? Does the code inherited from CMU CL already do this?
-  (unsafely-flushable))
+  (unsafely-flushable explicit-check))
 
 (defknown (null symbolp atom consp listp numberp integerp rationalp floatp
                 complexp characterp stringp bit-vector-p vectorp
                 simple-vector-p simple-string-p simple-bit-vector-p arrayp
-                sb!xc:packagep functionp compiled-function-p not)
+                packagep functionp compiled-function-p not)
   (t) boolean (movable foldable flushable))
 
 (defknown (eq eql %eql/integer) (t t) boolean
@@ -175,7 +177,7 @@
 (defknown %make-symbol (simple-string) symbol (flushable))
 (defknown copy-symbol (symbol &optional t) symbol (flushable))
 (defknown gensym (&optional (or string unsigned-byte)) symbol ())
-(defknown symbol-package (symbol) (or sb!xc:package null) (flushable))
+(defknown symbol-package (symbol) (or package null) (flushable))
 (defknown keywordp (t) boolean (flushable))       ; If someone uninterns it...
 
 ;;;; from the "Packages" chapter:
@@ -188,16 +190,16 @@
                                           ;; ### extensions...
                                           (:internal-symbols index)
                                           (:external-symbols index))
-  sb!xc:package)
-(defknown find-package (package-designator) (or sb!xc:package null)
+  package)
+(defknown find-package (package-designator) (or package null)
   (flushable))
 (defknown find-undeleted-package-or-lose (package-designator)
-  sb!xc:package) ; not flushable
+  package) ; not flushable
 (defknown package-name (package-designator) (or simple-string null)
   (unsafely-flushable))
 (defknown package-nicknames (package-designator) list (unsafely-flushable))
 (defknown rename-package (package-designator package-designator &optional list)
-  sb!xc:package)
+  package)
 (defknown package-use-list (package-designator) list (unsafely-flushable))
 (defknown package-used-by-list (package-designator) list (unsafely-flushable))
 (defknown package-shadowing-symbols (package-designator) list (unsafely-flushable))
@@ -501,7 +503,7 @@
                                         &key
                                         (:initial-element t))
   consed-sequence
-  (movable)
+  (movable explicit-check)
   :derive-type (creation-result-type-specifier-nth-arg 1))
 
 (defknown concatenate (type-specifier &rest sequence) consed-sequence
@@ -719,7 +721,7 @@
 (defknown merge (type-specifier sequence sequence callable
                                 &key (:key callable))
   sequence
-  (call important-result)
+  (call important-result explicit-check)
   :derive-type (creation-result-type-specifier-nth-arg 1)
   :destroyed-constant-args (nth-constant-nonempty-sequence-args 2 3))
 
@@ -1206,9 +1208,8 @@
   (any explicit-check)
   :derive-type #'result-type-first-arg)
 
-(defknown output-object (t stream)
-  null
-  (any explicit-check))
+(defknown output-object (t stream) null (any explicit-check))
+(defknown %write (t stream-designator) t (any explicit-check))
 
 (defknown (pprint) (t &optional stream-designator) (values)
   (explicit-check))
@@ -1416,7 +1417,7 @@
 (defknown warn (t &rest t) null)
 (defknown invoke-debugger (condition) nil)
 (defknown break (&optional format-control &rest t) null)
-(defknown make-condition (type-specifier &rest t) condition)
+(defknown make-condition (type-specifier &rest t) condition (explicit-check))
 (defknown compute-restarts (&optional (or condition null)) list)
 (defknown find-restart (restart-designator &optional (or condition null))
   (or restart null))
@@ -1582,8 +1583,6 @@
 (defknown %verify-arg-count (index index) (values))
 
 (defknown %arg-count-error (t t) nil)
-;; And of course DESTRUCTURING-BIND has its own variation on a theme.
-(defknown sb!kernel::arg-count-error (t t t t t t) nil)
 (defknown %unknown-values () *)
 (defknown %catch (t t) t)
 (defknown %unwind-protect (t t) t)
@@ -1721,8 +1720,6 @@
 (defknown %check-vector-sequence-bounds (vector index sequence-end)
   index
   (unwind))
-
-(defknown arg-count-error (t t t t t t) nil ())
 
 ;;;; SETF inverses
 

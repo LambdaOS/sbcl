@@ -130,6 +130,9 @@
  ("src/code/parse-body")       ; on host for PARSE-BODY
  ("src/code/unportable-float")
  ("src/compiler/policy")
+ ;; PARSE-{UNKNOWN,DEPRECATED}-TYPE and other things should be known
+ ;; condition subtypes as soon as possible
+ ("src/code/condition-boot" :not-host)
  ("src/code/early-extensions") ; on host for COLLECT, SYMBOLICATE, etc.
  ("src/compiler/parse-lambda-list")
  ("src/compiler/deftype")      ; on host for SB!XC:DEFTYPE
@@ -139,6 +142,7 @@
  ("src/code/specializable-array")
 
  ("src/code/early-cl")
+ ("src/code/ansi-stream" :not-host)
  ("src/code/early-fasl")
 
  ;; mostly needed by stuff from comcom, but also used by "x86-vm"
@@ -148,8 +152,6 @@
  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
  ;;; basic machinery for the target Lisp. Note that although most of these
  ;;; files are flagged :NOT-HOST, a few might not be.
-
- ("src/code/target-defbangmethod" :not-host)
 
  ("src/code/early-print" :not-host)
  ("src/code/early-pprint" :not-host)
@@ -173,8 +175,6 @@
  ;; accessors and inline functions defined here can be compiled inline
  ;; later. (Avoiding full calls increases efficiency)
  ("src/code/type-class")
-
- ("src/code/ansi-stream" :not-host)
 
  ("src/code/sysmacs" :not-host)
 
@@ -284,7 +284,6 @@
  ("src/code/stream"        :not-host)
  ("src/code/print"         :not-host)
  ("src/code/early-format")
- ("src/code/target-format" :not-host)
  ("src/code/defpackage"    :not-host)
 
  ("src/code/error-error" :not-host) ; needs WITH-STANDARD-IO-SYNTAX macro
@@ -321,6 +320,7 @@
  ("src/compiler/macros")
 
  ("src/compiler/fun-info")
+ ("src/code/early-classoid")
  ("src/compiler/globaldb")
  ("src/compiler/info-functions")
 
@@ -329,6 +329,8 @@
 
  ;; needed by "compiler/vop"
  ("src/compiler/sset")
+ ("src/code/xset") ; for representation of MEMBER type
+ ("src/code/early-type")
 
  ;; for e.g. BLOCK-ANNOTATION, needed by "compiler/vop"
  ("src/compiler/node")
@@ -361,17 +363,25 @@
 
  ;; for e.g. DESCRIPTOR-REG, needed by primtype.lisp
  ("src/compiler/target/vm")
- ("src/code/xset")
- ;; for e.g. SPECIFIER-TYPE, needed by primtype.lisp
- ("src/code/early-type")
 
+ ;; META-FIXME: I think I figured out why this was, and fixed that,
+ ;; and never removed the following comment, nor can I remember why.
  ;; FIXME: Classic CMU CL had (OPTIMIZE (SAFETY 2) (DEBUG 2) declared
  ;; around the compilation of "code/class". Why?
  ("src/code/class")
+ ("src/pcl/pre-warm")
+ ("src/pcl/early-low" :not-host)
+ ("src/pcl/low" :not-host)
 
- ;; The definition of CONDITION-CLASS depends on SLOT-CLASS, defined
- ;; in class.lisp.
+ ("src/code/early-condition")
  ("src/code/condition" :not-host)
+ ("src/code/parse-defmacro-errors")
+ ("src/code/format-directive")
+ ;; Target-only stuff should usually be compiled late unless it has
+ ;; compile-time side-effects. This file could probably be later,
+ ;; but should certainly be no earlier than the definitions
+ ;; of FORMAT-ERROR and FORMAT-DIRECTIVE.
+ ("src/code/target-format" :not-host)
 
  ("src/compiler/generic/primtype")
 
@@ -499,6 +509,7 @@
  ;; Compiling this requires fop definitions from code/fop.lisp and
  ("src/compiler/dump")
 
+ ("src/compiler/ir1report") ; for COMPILER-ERROR-CONTEXT
  ("src/compiler/main") ; needs DEFSTRUCT FASL-OUTPUT from dump.lisp
  ("src/compiler/xref")
  ("src/code/source-location")
@@ -507,7 +518,6 @@
  ("src/compiler/ir1tran-lambda")
  ("src/compiler/ir1-translators")
  ("src/compiler/ir1util")
- ("src/compiler/ir1report")
  ("src/compiler/ir1opt")
  ("src/compiler/loop")
 
@@ -724,11 +734,6 @@
  ("src/code/external-formats/enc-ucs" :not-host)
  #!+sb-unicode
  ("src/code/external-formats/enc-utf" :not-host)
-
- ;; The code here can't be compiled until CONDITION and
- ;; DEFINE-CONDITION are defined and SB!DEBUG:*STACK-TOP-HINT* is
- ;; declared special.
- ("src/code/parse-defmacro-errors")
 
  #!+sb-eval
  ("src/code/full-eval"   :not-host) ; uses INFO, ARG-COUNT-ERROR

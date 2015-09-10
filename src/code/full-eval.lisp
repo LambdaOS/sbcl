@@ -111,7 +111,8 @@
                    (sb!c::lexenv-handled-conditions old-lexenv)
                    (sb!c::lexenv-disabled-package-locks old-lexenv)
                    (sb!c::lexenv-policy old-lexenv) ; = (OR %POLICY *POLICY*)
-                   (sb!c::lexenv-user-data old-lexenv))))
+                   (sb!c::lexenv-user-data old-lexenv)
+                   old-lexenv)))
       (dolist (declaration declarations)
         (unless (consp declaration)
           (ip-error "malformed declaration specifier ~S in ~S"
@@ -185,7 +186,7 @@
               nil nil
               nil nil nil nil nil nil nil
               sb!c::*policy*
-              nil)))
+              nil nil)))
 
 ;;; Augment ENV with a special or lexical variable binding
 (declaim (inline push-var))
@@ -570,6 +571,7 @@
 (defun parse-lambda-headers (body &key doc-string-allowed)
   (loop with documentation = nil
         with declarations = nil
+        with lambda-list = :unspecified
         for form on body do
         (cond
           ((and doc-string-allowed (stringp (car form)))
@@ -579,31 +581,33 @@
                    (setf documentation (car form)))
                (return (values form documentation declarations))))
           ((and (consp (car form)) (eql (caar form) 'declare))
+           (when (eq lambda-list :unspecified)
+             (dolist (item (cdar form))
+               (when (and (consp item) (eq (car item) 'sb!c::lambda-list))
+                 (setq lambda-list (second item)))))
            (setf declarations (append declarations (cdar form))))
-          (t (return (values form documentation declarations))))
-        finally (return (values nil documentation declarations))))
+          (t (return (values form documentation declarations lambda-list))))
+        finally (return (values nil documentation declarations lambda-list))))
 
 ;;; Create an interpreted function from the lambda-form EXP evaluated
 ;;; in the environment ENV.
 (defun eval-lambda (exp env)
-  (case (car exp)
-    ((lambda)
-     (multiple-value-bind (body documentation declarations)
-         (parse-lambda-headers (cddr exp) :doc-string-allowed t)
-       (make-interpreted-function :lambda-list (second exp)
-                                  :env env :body body
+  (sb!int:binding* (((name rest)
+                     (case (car exp)
+                      ((lambda) (values nil (cdr exp)))
+                      ((sb!int:named-lambda) (values (second exp) (cddr exp)))))
+                    (lambda-list (car rest))
+                    ((forms documentation declarations debug-lambda-list)
+                     (parse-lambda-headers (cdr rest) :doc-string-allowed t)))
+       (make-interpreted-function :name name
+                                  :lambda-list lambda-list
+                                  :debug-lambda-list
+                                  (if (eq debug-lambda-list :unspecified)
+                                      lambda-list debug-lambda-list)
+                                  :env env :body forms
                                   :documentation documentation
                                   :source-location (sb!c::make-definition-source-location)
                                   :declarations declarations)))
-    ((sb!int:named-lambda)
-     (multiple-value-bind (body documentation declarations)
-         (parse-lambda-headers (cdddr exp) :doc-string-allowed t)
-       (make-interpreted-function :name (second exp)
-                                  :lambda-list (third exp)
-                                  :env env :body body
-                                  :documentation documentation
-                                  :source-location (sb!c::make-definition-source-location)
-                                  :declarations declarations)))))
 
 (defun eval-progn (body env)
   (let ((previous-exp nil))

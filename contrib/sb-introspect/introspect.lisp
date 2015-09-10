@@ -39,6 +39,7 @@
            "DEFINITION-SOURCE"
            "DEFINITION-SOURCE-PATHNAME"
            "DEFINITION-SOURCE-FORM-PATH"
+           "DEFINITION-SOURCE-FORM-NUMBER"
            "DEFINITION-SOURCE-CHARACTER-OFFSET"
            "DEFINITION-SOURCE-FILE-WRITE-DATE"
            "DEFINITION-SOURCE-PLIST"
@@ -149,12 +150,19 @@ constant pool."
   ;; This may be incomplete depending on the debug level at which the
   ;; source was compiled.
   (form-path '() :type list)
+  ;; Depth first number of the form.
+  ;; FORM-PATH above usually contains just the top-level form number,
+  ;; ideally the proper form path could be dervied from the
+  ;; form-number and the tlf-number, but it's a bit complicated and
+  ;; Slime already knows how to deal with form numbers, so delegate
+  ;; that job to Slime.
+  (form-number nil :type (or null unsigned-byte))
   ;; Character offset of the top-level-form containing the definition.
   ;; This corresponds to the first element of form-path.
-  (character-offset nil :type (or null integer))
+  (character-offset nil :type (or null unsigned-byte))
   ;; File-write-date of the source file when compiled.
   ;; Null if not compiled from a file.
-  (file-write-date nil :type (or null integer))
+  (file-write-date nil :type (or null unsigned-byte))
   ;; plist from WITH-COMPILATION-UNIT
   (plist nil)
   ;; Any extra metadata that the caller might be interested in. For
@@ -169,8 +177,10 @@ constant pool."
             for source = (find-definition-source
                           (sb-c::vop-info-generator-function vop))
             do (setf (definition-source-description source)
-                     (list (sb-c::template-name vop)
-                           (sb-c::template-note vop)))
+                     (if (sb-c::template-note vop)
+                         (list (sb-c::template-name vop)
+                               (sb-c::template-note vop))
+                         (list (sb-c::template-name vop))))
             collect source))))
 
 (defun find-vop-source (name)
@@ -387,7 +397,10 @@ If an unsupported TYPE is requested, the function will return NIL.
           (loop for (kind loc) on locations by #'cddr
                 when loc
                 collect (let ((loc (translate-source-location loc)))
-                          (setf (definition-source-description loc) (list kind))
+                          (setf (definition-source-description loc)
+                                ;; Copy list to ensure that user code
+                                ;; cannot mutate the original.
+                                (copy-list (sb-int:ensure-list kind)))
                           loc))))
        (t
         nil)))))
@@ -407,7 +420,7 @@ If an unsupported TYPE is requested, the function will return NIL.
        (sb-pcl::method-combination-type-name object) :method-combination)))
     (package
      (translate-source-location (sb-impl::package-source-location object)))
-    (class
+    ((or class sb-mop:slot-definition)
      (translate-source-location (sb-pcl::definition-source object)))
     ;; Use the PCL definition location information instead of the function
     ;; debug-info for methods and generic functions. Sometimes the
@@ -452,20 +465,13 @@ If an unsupported TYPE is requested, the function will return NIL.
          (tlf (if debug-fun (sb-c::compiled-debug-fun-tlf-number debug-fun))))
     (make-definition-source
      :pathname
-     ;; KLUDGE: at the moment, we don't record the correct toplevel
-     ;; form number for forms processed by EVAL (including EVAL-WHEN
-     ;; :COMPILE-TOPLEVEL).  Until that's fixed, don't return a
-     ;; DEFINITION-SOURCE with a pathname.  (When that's fixed, take
-     ;; out the (not (debug-source-form ...)) test.
      (when (stringp (sb-c::debug-source-namestring debug-source))
        (parse-namestring (sb-c::debug-source-namestring debug-source)))
      :character-offset
      (if tlf
          (elt (sb-c::debug-source-start-positions debug-source) tlf))
-     ;; Unfortunately there is no proper source path available in the
-     ;; debug-source. FIXME: We could use sb-di:code-locations to get
-     ;; a full source path. -luke (12/Mar/2005)
      :form-path (if tlf (list tlf))
+     :form-number (sb-c::compiled-debug-fun-form-number debug-fun)
      :file-write-date (sb-c::debug-source-created debug-source)
      :plist (sb-c::debug-source-plist debug-source))))
 
@@ -480,6 +486,8 @@ If an unsupported TYPE is requested, the function will return NIL.
                          location)))
          (when number
            (list number)))
+       :form-number (sb-c:definition-source-location-form-number
+                     location)
        :plist (sb-c:definition-source-location-plist location))
       (make-definition-source)))
 

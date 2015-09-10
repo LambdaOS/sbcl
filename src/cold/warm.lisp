@@ -65,6 +65,8 @@
 
 ;;;; compiling and loading more of the system
 
+(load "src/cold/muffler.lisp")
+
 ;;; FIXME: CMU CL's pclcom.lisp had extra optional stuff wrapped around
 ;;; COMPILE-PCL, at least some of which we should probably have too:
 ;;;
@@ -103,10 +105,10 @@
                 ;; order dependencies from the old PCL defsys.lisp
                 ;; dependency database.
                 #+nil "src/pcl/walk" ; #+NIL = moved to build-order.lisp-expr
-                "SRC;PCL;EARLY-LOW"
+                #+nil "SRC;PCL;EARLY-LOW"
                 "SRC;PCL;MACROS"
                 "SRC;PCL;COMPILER-SUPPORT"
-                "SRC;PCL;LOW"
+                #+nil "SRC;PCL;LOW"
                 #+nil "SRC;PCL;SLOT-NAME" ; moved to build-order.lisp-expr
                 "SRC;PCL;DEFCLASS"
                 "SRC;PCL;DEFS"
@@ -162,8 +164,12 @@
                 "SRC;CODE;STEP"
                 "SRC;CODE;WARM-LIB"
                 #+win32 "SRC;CODE;WARM-MSWIN"
-                "SRC;CODE;RUN-PROGRAM")))
+                "SRC;CODE;RUN-PROGRAM"))
+      (sb-c::*handled-conditions* sb-c::*handled-conditions*))
  (declare (special *compile-files-p*))
+ (proclaim '(sb-ext:muffle-conditions
+             (or (satisfies unable-to-optimize-note-p)
+                 (satisfies optional+key-style-warning-p))))
  (flet
     ((do-srcs (list)
        (dolist (stem list)
@@ -223,6 +229,10 @@
       'sb-kernel:classoid (lambda (stream obj)
                             (print-unreadable-object (obj stream :type t)
                               (write (sb-kernel:classoid-name obj) :stream stream))))
+     (set-pprint-dispatch
+      'sb-kernel:ctype (lambda (stream obj)
+                         (print-unreadable-object (obj stream :type t)
+                           (prin1 (sb-kernel:type-specifier obj) stream))))
      (set-pprint-dispatch
       'package (lambda (stream obj)
                  (print-unreadable-object (obj stream :type t)

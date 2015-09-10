@@ -174,15 +174,15 @@ EXPERIMENTAL INTERFACE: Subject to change."
   policy)
 
 ;;; Is it deprecated?
-(declaim (ftype function deprecation-warning))
+(declaim (ftype function deprecation-warn))
 (defun policy-quality-deprecation-warning (quality)
   (case quality
     ((stack-allocate-dynamic-extent stack-allocate-vector stack-allocate-value-cells)
-     (deprecation-warning :late "1.0.19.7" quality '*stack-allocate-dynamic-extent*
-                          :runtime-error nil)
+     (deprecation-warn :late "SBCL" "1.0.19.7" 'policy quality '*stack-allocate-dynamic-extent*
+                       :runtime-error nil)
      t)
     ((merge-tail-calls)
-     (deprecation-warning :early "1.0.53.74" quality nil :runtime-error nil)
+     (deprecation-warn :early "SBCL" "1.0.53.74" 'policy quality nil :runtime-error nil)
      t)
     (otherwise
      nil)))
@@ -320,7 +320,8 @@ EXPERIMENTAL INTERFACE: Subject to change."
                   :name ',name
                   :expression ',expression
                   ;; DESCRIBE-COMPILER-POLICY uses the getter
-                  :getter (lambda (policy) (policy policy ,expression))
+                  :getter (named-lambda ,(string name) (policy)
+                            (policy policy ,expression))
                   :values-documentation ',values-documentation)))
        (if number
            (setf (svref **policy-dependent-qualities** number) item)

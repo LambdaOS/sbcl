@@ -996,9 +996,7 @@
 ;;; The CL:ASSERT restarts and whatnot expand into a significant
 ;;; amount of code when you multiply them by 400, so replacing them
 ;;; with this should reduce the size of the system by enough to be
-;;; worthwhile. ENFORCE-TYPE is much less common, but might still be
-;;; worthwhile, and since I don't really like CERROR stuff deep in the
-;;; guts of complex systems anyway, I replaced it too.)
+;;; worthwhile.)
 (defmacro aver (expr)
   `(unless ,expr
      (%failed-aver ',expr)))
@@ -1018,20 +1016,6 @@
   (error 'bug
          :format-control format-control
          :format-arguments format-arguments))
-
-(defmacro enforce-type (value type)
-  (once-only ((value value))
-    `(unless (typep ,value ',type)
-       (%failed-enforce-type ,value ',type))))
-
-(defun %failed-enforce-type (value type)
-  ;; maybe should be TYPE-BUG, subclass of BUG?  If it is changed,
-  ;; check uses of it in user-facing code (e.g. WARN)
-  (error 'simple-type-error
-         :datum value
-         :expected-type type
-         :format-control "~@<~S ~_is not a ~_~S~:>"
-         :format-arguments (list value type)))
 
 ;;; Return a function like FUN, but expecting its (two) arguments in
 ;;; the opposite order that FUN does.
@@ -1244,70 +1228,125 @@
 
 ;;;; Deprecating stuff
 
+(deftype deprecation-state ()
+  '(member :early :late :final))
+
+(deftype deprecation-software-and-version ()
+  '(or string (cons string (cons string null))))
+
+(defun normalize-deprecation-since (since)
+  (unless (typep since 'deprecation-software-and-version)
+    (error 'simple-type-error
+           :datum since
+           :expected-type 'deprecation-software-and-version
+           :format-control "~@<The value ~S does not designate a ~
+                            version or a software name and a version.~@:>"
+           :format-arguments (list since)))
+  (if (typep since 'string)
+      (values nil since)
+      (values-list since)))
+
 (defun normalize-deprecation-replacements (replacements)
   (if (or (not (listp replacements))
           (eq 'setf (car replacements)))
       (list replacements)
       replacements))
 
-(defun deprecation-error (since name replacements)
-  (error 'deprecation-error
-          :name name
-          :replacements (normalize-deprecation-replacements replacements)
-          :since since))
+(defstruct (deprecation-info
+             (:constructor make-deprecation-info
+                           (state software version &optional replacement-spec
+                            &aux
+                            (replacements (normalize-deprecation-replacements
+                                           replacement-spec))))
+             (:copier nil))
+  (state        (missing-arg) :type deprecation-state :read-only t)
+  (software     (missing-arg) :type (or null string)  :read-only t)
+  (version      (missing-arg) :type string            :read-only t)
+  (replacements '()           :type list              :read-only t))
 
-(defun deprecation-warning (state since name replacements
-                            &key (runtime-error (neq :early state)))
+;; Return the state of deprecation of the thing identified by
+;; NAMESPACE and NAME, or NIL.
+(defun deprecated-thing-p (namespace name)
+  (multiple-value-bind (info infop)
+      (ecase namespace
+        (variable (info :variable :deprecated name))
+        (function (info :function :deprecated name))
+        (type     (info :type     :deprecated name)))
+    (when infop
+      (values (deprecation-info-state info)
+              (list (deprecation-info-software info)
+                    (deprecation-info-version info))
+              (deprecation-info-replacements info)))))
+
+(defun deprecation-error (software version namespace name replacements)
+  (error 'deprecation-error
+         :namespace namespace
+         :name name
+         :software software
+         :version version
+         :replacements (normalize-deprecation-replacements replacements)))
+
+(defun deprecation-warn (state software version namespace name replacements
+                         &key (runtime-error (neq :early state)))
   (warn (ecase state
           (:early 'early-deprecation-warning)
           (:late 'late-deprecation-warning)
           (:final 'final-deprecation-warning))
+        :namespace namespace
         :name name
+        :software software
+        :version version
         :replacements (normalize-deprecation-replacements replacements)
-        :since since
         :runtime-error runtime-error))
 
-(defun deprecated-function (since name replacements &optional doc)
-  (declare (ignorable since name replacements doc))
-  #+sb-xc-host
-  (error "Can't define deprecated functions on the host")
-  #-sb-xc-host
-  (let ((closure
-         ;; setting the name is mildly redundant since the closure captures
-         ;; its name. However %FUN-DOC can't make use of that fact.
-         (set-closure-name
-          (lambda (&rest deprecated-function-args)
-            (declare (ignore deprecated-function-args))
-            (deprecation-error since name replacements))
-          name)))
-    (when doc
-      (setf (%fun-doc closure) doc))
-    closure))
+(defun check-deprecated-thing (namespace name)
+  (multiple-value-bind (state since replacements)
+      (deprecated-thing-p namespace name)
+    (when state
+      (deprecation-warn
+       state (first since) (second since) namespace name replacements)
+      (values state since replacements))))
 
-;; Note: Naming a lambda does not work on the host, so we can't actually
-;; detect deprecated functions.
-(defun deprecation-compiler-macro (state since name replacements)
-  ;; this lambda's name is significant - see DEPRECATED-THING-P
-  (named-lambda .deprecation-warning. (form env)
-    (declare (ignore env))
-    (deprecation-warning state since name replacements)
-    form))
+;;; For-effect-only variant of CHECK-DEPRECATED-THING for
+;;; type-specifiers that descends into compound type-specifiers.
+(defun %check-deprecated-type (type-specifier)
+  (let ((seen '()))
+    ;; KLUDGE: we have to use SPECIFIER-TYPE to sanely traverse
+    ;; TYPE-SPECIFIER and detect references to deprecated types. But
+    ;; then we may have to drop its cache to get the
+    ;; PARSE-DEPRECATED-TYPE condition when TYPE-SPECIFIER is parsed
+    ;; again later.
+    ;;
+    ;; Proper fix would be a
+    ;;
+    ;;   walk-type function type-specifier
+    ;;
+    ;; mechanism that could drive VALUES-SPECIFIER-TYPE but also
+    ;; things like this function.
+    (block nil
+      (handler-bind
+          ((sb!kernel::parse-deprecated-type
+             (lambda (condition)
+               (let ((type-specifier (sb!kernel::parse-deprecated-type-specifier
+                                      condition)))
+                 (aver (symbolp type-specifier))
+                 (unless (memq type-specifier seen)
+                   (push type-specifier seen)
+                   (check-deprecated-thing 'type type-specifier)))))
+           ((or error sb!kernel:parse-unknown-type)
+             (lambda (condition)
+               (declare (ignore condition))
+               (return))))
+        (specifier-type type-specifier)))))
 
-;; Return the stage of deprecation of thing identified by KIND and NAME, or NIL.
-(defun deprecated-thing-p (kind name)
-  (declare (ignorable kind name))
-  (ecase kind
-    (:function
-     ;; This can't work on the host due to CLOSUREP,%FUN-NAME, etc.
-     #-sb-xc-host
-     (let ((macro-fun (info :function :compiler-macro-function name)))
-       (and (closurep macro-fun)
-            (eq (%fun-name macro-fun) '.deprecation-warning.)
-            ;; If you name a function literally :EARLY and it happens to
-            ;; be in :LATE deprecation, then this could be wrong; etc.
-            ;; But come on now ... who would name a function like that?
-            (find-if-in-closure (lambda (x) (member x '(:early :late :final)))
-                                macro-fun))))))
+(defun check-deprecated-type (type-specifier)
+  (typecase type-specifier
+    ((and type-specifier (not instance))
+     (%check-deprecated-type type-specifier))
+    (class
+     (let ((name (class-name type-specifier)))
+       (when (and name (symbolp name))
+         (%check-deprecated-type name))))))
 
 ;; This is the moral equivalent of a warning from /usr/bin/ld that
 ;; "gets() is dangerous." You're informed by both the compiler and linker.
@@ -1341,110 +1380,115 @@
 ;;; deprecated.texinfo.
 ;;;
 ;;; EARLY:
-;;; - SOCKINT::WIN32-BIND                          since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-GETSOCKNAME                   since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-LISTEN                        since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-RECV                          since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-RECVFROM                      since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-SEND                          since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-SENDTO                        since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-CLOSE                         since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-CONNECT                       since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-GETPEERNAME                   since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-IOCTL                         since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-SETSOCKOPT                    since 1.2.10 (03/2015) -> Late: 08/2015
-;;; - SOCKINT::WIN32-GETSOCKOPT                    since 1.2.10 (03/2015) -> Late: 08/2015
+;;; - SOCKINT::WIN32-BIND                          since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-GETSOCKNAME                   since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-LISTEN                        since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-RECV                          since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-RECVFROM                      since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-SEND                          since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-SENDTO                        since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-CLOSE                         since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-CONNECT                       since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-GETPEERNAME                   since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-IOCTL                         since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-SETSOCKOPT                    since 1.2.10 (03/2015)    -> Late: 08/2015
+;;; - SOCKINT::WIN32-GETSOCKOPT                    since 1.2.10 (03/2015)    -> Late: 08/2015
 ;;;
-;;; - SB-THREAD::GET-MUTEX, since 1.0.37.33 (04/2010)               -> Late: 01/2013
-;;;   ^- initially deprecated without compile-time warning, hence the schedule
-;;; - SB-THREAD::SPINLOCK (type), since 1.0.53.11 (08/2011)         -> Late: 08/2012
-;;; - SB-THREAD::MAKE-SPINLOCK, since 1.0.53.11 (08/2011)           -> Late: 08/2012
-;;; - SB-THREAD::WITH-SPINLOCK, since 1.0.53.11 (08/2011)           -> Late: 08/2012
-;;; - SB-THREAD::WITH-RECURSIVE-SPINLOCK, since 1.0.53.11 (08/2011) -> Late: 08/2012
-;;; - SB-THREAD::GET-SPINLOCK, since 1.0.53.11 (08/2011)            -> Late: 08/2012
-;;; - SB-THREAD::RELEASE-SPINLOCK, since 1.0.53.11 (08/2011)        -> Late: 08/2012
-;;; - SB-THREAD::SPINLOCK-VALUE, since 1.0.53.11 (08/2011)          -> Late: 08/2012
-;;; - SB-THREAD::SPINLOCK-NAME, since 1.0.53.11 (08/2011)           -> Late: 08/2012
-;;; - SETF SB-THREAD::SPINLOCK-NAME, since 1.0.53.11 (08/2011)      -> Late: 08/2012
-;;; - SB-C::MERGE-TAIL-CALLS (policy), since 1.0.53.74 (11/2011)    -> Late: 11/2012
-;;; - SB-EXT:QUIT, since 1.0.56.55 (05/2012)                        -> Late: 05/2013
-;;; - SB-UNIX:UNIX-EXIT, since 1.0.56.55 (05/2012)                  -> Late: 05/2013
-;;; - SB-DEBUG:*SHOW-ENTRY-POINT-DETAILS*, since 1.1.4.9 (02/2013)  -> Late: 02/2014
+;;; - SB-C::MERGE-TAIL-CALLS (policy)              since 1.0.53.74 (11/2011) -> Late: 11/2012
 ;;;
 ;;; LATE:
-;;; - SB-SYS:OUTPUT-RAW-BYTES, since 1.0.8.16 (06/2007)                 -> Final: anytime
-;;;   Note: make sure CLX doesn't use it anymore!
-;;; - SB-C::STACK-ALLOCATE-DYNAMIC-EXTENT (policy), since 1.0.19.7      -> Final: anytime
-;;; - SB-C::STACK-ALLOCATE-VECTOR (policy), since 1.0.19.7              -> Final: anytime
-;;; - SB-C::STACK-ALLOCATE-VALUE-CELLS (policy), since 1.0.19.7         -> Final: anytime
-;;; - SB-INTROSPECT:FUNCTION-ARGLIST, since 1.0.24.5 (01/2009)          -> Final: anytime
-;;; - SB-THREAD:JOIN-THREAD-ERROR-THREAD, since 1.0.29.17 (06/2009)     -> Final: 09/2012
-;;; - SB-THREAD:INTERRUPT-THREAD-ERROR-THREAD since 1.0.29.17 (06/2009) -> Final: 06/2012
+;;; - SB-C::STACK-ALLOCATE-DYNAMIC-EXTENT (policy) since 1.0.19.7            -> Final: anytime
+;;; - SB-C::STACK-ALLOCATE-VECTOR (policy)         since 1.0.19.7            -> Final: anytime
+;;; - SB-C::STACK-ALLOCATE-VALUE-CELLS (policy)    since 1.0.19.7            -> Final: anytime
 
-(deftype deprecation-state ()
-  '(member :early :late :final))
-
-(defun print-deprecation-message (name since &optional replacements stream)
+(defun print-deprecation-replacements (stream replacements &optional colonp atp)
+  (declare (ignore colonp atp))
   (apply #'format stream
          (!uncross-format-control
-         "~/sb!impl:print-symbol-with-prefix/ has been ~
-          deprecated as of SBCL ~A.~
-          ~#[~;~
-            ~2%Use ~/sb!impl:print-symbol-with-prefix/ instead.~;~
-            ~2%Use ~/sb!impl:print-symbol-with-prefix/ or ~
-            ~/sb!impl:print-symbol-with-prefix/ instead.~:;~
-            ~2%Use~@{~#[~; or~] ~
-            ~/sb!impl:print-symbol-with-prefix/~^,~} instead.~
-          ~]")
-         name since replacements))
+          "~#[~;~
+             Use ~/sb!impl:print-symbol-with-prefix/ instead.~;~
+             Use ~/sb!impl:print-symbol-with-prefix/ or ~
+             ~/sb!impl:print-symbol-with-prefix/ instead.~:;~
+             Use~@{~#[~; or~] ~
+             ~/sb!impl:print-symbol-with-prefix/~^,~} instead.~
+           ~]")
+         replacements))
 
-(defmacro define-deprecated-function (state since name replacements lambda-list
+(defun print-deprecation-message (namespace name software version
+                                  &optional replacements stream)
+  (format stream
+          (!uncross-format-control
+           "The ~(~A~) ~/sb!impl:print-symbol-with-prefix/ has been ~
+            deprecated as of ~@[~A ~]version ~A.~
+            ~@[~2%~/sb!impl::print-deprecation-replacements/~]")
+          namespace name software version replacements))
+
+(defun setup-function-in-final-deprecation
+    (software version name replacement-spec)
+  #+sb-xc-host (declare (ignore software version name replacement-spec))
+  #-sb-xc-host
+  (setf (fdefinition name)
+        (sb!impl::set-closure-name
+         (lambda (&rest args)
+           (declare (ignore args))
+           (deprecation-error software version 'function name replacement-spec))
+         name)))
+
+(defun setup-variable-in-final-deprecation
+    (software version name replacement-spec)
+  (sb!c::%define-symbol-macro
+   name
+   `(deprecation-error
+     ,software ,version 'variable ',name
+     (list ,@(mapcar
+              (lambda (replacement)
+                `',replacement)
+              (normalize-deprecation-replacements replacement-spec))))
+   nil))
+
+(defun setup-type-in-final-deprecation
+    (software version name replacement-spec)
+  (declare (ignore software version replacement-spec))
+  (%compiler-deftype name (constant-type-expander t) nil))
+
+(defmacro define-deprecated-function (state version name replacements lambda-list
                                       &body body)
   (declare (type deprecation-state state)
-           (type string since)
+           (type string version)
            (type function-name name)
            (type (or function-name list) replacements)
-           (type list lambda-list))
-  (let* ((replacements (normalize-deprecation-replacements replacements))
-         (doc (print-deprecation-message name since replacements)))
-    (declare (ignorable doc))
-    `(prog1
-         ,(ecase state
-            ((:early :late)
-             `(defun ,name ,lambda-list
-                #!+sb-doc ,doc
-                ,@body))
-            ((:final)
-             `(progn
-                (declaim (ftype (function * nil) ,name))
-                (setf (fdefinition ',name)
-                      (deprecated-function ,since ',name ',replacements
-                                           #!+sb-doc ,doc))
-                ',name)))
-       (setf (compiler-macro-function ',name)
-             (deprecation-compiler-macro ,state ,since ',name ',replacements)))))
+           (type list lambda-list)
+           #+sb-xc-host (ignore version replacements))
+  `(progn
+     #-sb-xc-host
+     (declaim (deprecated
+               ,state ("SBCL" ,version)
+               (function ,name ,@(when replacements
+                                   `(:replacement ,replacements)))))
+     ,(ecase state
+        ((:early :late)
+         `(defun ,name ,lambda-list
+            ,@body))
+        ((:final)
+         `',name))))
 
-(defun check-deprecated-variable (name)
-  (let ((info (info :variable :deprecated name)))
-    (when info
-      (deprecation-warning (first info) (second info) name (third info))
-      (values-list info))))
-
-(defmacro define-deprecated-variable (state since name
+(defmacro define-deprecated-variable (state version name
                                       &key (value nil valuep) replacement)
-  (declare (ignorable replacement)
-           (type deprecation-state state)
-           (type string since)
-           (type symbol name))
-  `(prog2
-       (setf (info :variable :deprecated ',name)
-             '(,state ,since ,(when replacement `(,replacement))))
-       ,(if (member state '(:early :late))
-            `(defvar ,name ,@(when valuep (list value)))
-            `',name)
-     #!+sb-doc
-     (setf (fdocumentation ',name 'variable)
-           ,(print-deprecation-message name since (list replacement)))))
+  (declare (type deprecation-state state)
+           (type string version)
+           (type symbol name)
+           #+sb-xc-host (ignore version replacement))
+  `(progn
+     #-sb-xc-host
+     (declaim (deprecated
+               ,state ("SBCL" ,version)
+               (variable ,name ,@(when replacement
+                                   `(:replacement ,replacement)))))
+     ,(ecase state
+        ((:early :late)
+         `(defvar ,name ,@(when valuep (list value))))
+        ((:final)
+         `',name))))
 
 ;; Given DECLS as returned by from parse-body, and SYMBOLS to be bound
 ;; (with LET, MULTIPLE-VALUE-BIND, etc) return two sets of declarations:
@@ -1656,76 +1700,6 @@ to :INTERPRET, an interpreter will be used.")
      (if (eql x 0.0l0)
          (make-unportable-float :long-float-negative-zero)
          0.0l0))))
-
-;;; Signalling an error when trying to print an error condition is
-;;; generally a PITA, so whatever the failure encountered when
-;;; wondering about FILE-POSITION within a condition printer, 'tis
-;;; better silently to give up than to try to complain.
-(defun file-position-or-nil-for-error (stream &optional (pos nil posp))
-  ;; Arguably FILE-POSITION shouldn't be signalling errors at all; but
-  ;; "NIL if this cannot be determined" in the ANSI spec doesn't seem
-  ;; absolutely unambiguously to prohibit errors when, e.g., STREAM
-  ;; has been closed so that FILE-POSITION is a nonsense question. So
-  ;; my (WHN) impression is that the conservative approach is to
-  ;; IGNORE-ERRORS. (I encountered this failure from within a homebrew
-  ;; defsystemish operation where the ERROR-STREAM had been CL:CLOSEd,
-  ;; I think by nonlocally exiting through a WITH-OPEN-FILE, by the
-  ;; time an error was reported.)
-  (ignore-errors
-   (if posp
-       (file-position stream pos)
-       (file-position stream))))
-
-(declaim (ftype (function (t &optional t) (values cons &optional))
-                line/col-from-charpos))
-(defun stream-error-position-info (stream &optional position)
-  (when (and (not position) (form-tracking-stream-p stream))
-    (let ((line/col (line/col-from-charpos stream)))
-      (return-from stream-error-position-info
-        `((:line ,(car line/col))
-          (:column ,(cdr line/col))
-          ,@(let ((position (file-position-or-nil-for-error stream)))
-              ;; FIXME: 1- is technically broken for multi-byte external
-              ;; encodings, albeit bug-compatible with the broken code in
-              ;; the general case (below) for non-form-tracking-streams.
-              ;; i.e. If you position to this byte, it might not be the
-              ;; first byte of any character.
-              (when position `((:file-position ,(1- position)))))))))
-
-  ;; Give up early for interactive streams and non-character stream.
-  (when (or (ignore-errors (interactive-stream-p stream))
-            (not (subtypep (ignore-errors (stream-element-type stream))
-                           'character)))
-    (return-from stream-error-position-info))
-
-  (flet ((read-content (old-position position)
-           "Read the content of STREAM into a buffer in order to count
-lines and columns."
-           (unless (and old-position position
-                        (< position sb!xc:array-dimension-limit))
-             (return-from read-content))
-           (let ((content
-                   (make-string position :element-type (stream-element-type stream))))
-             (when (and (file-position-or-nil-for-error stream :start)
-                        (eql position (ignore-errors (read-sequence content stream))))
-               (file-position-or-nil-for-error stream old-position)
-               content)))
-         ;; Lines count from 1, columns from 0. It's stupid and
-         ;; traditional.
-         (line (string)
-           (1+ (count #\Newline string)))
-         (column (string position)
-           (- position (or (position #\Newline string :from-end t) 0))))
-   (let* ((stream-position (file-position-or-nil-for-error stream))
-          (position (or position
-                        ;; FILE-POSITION is the next character --
-                        ;; error is at the previous one.
-                        (and stream-position (plusp stream-position)
-                             (1- stream-position))))
-          (content (read-content stream-position position)))
-     `(,@(when content `((:line ,(line content))
-                         (:column ,(column content position))))
-       ,@(when position `((:file-position ,position)))))))
 
 (declaim (inline schwartzian-stable-sort-list))
 (defun schwartzian-stable-sort-list (list comparator &key key)

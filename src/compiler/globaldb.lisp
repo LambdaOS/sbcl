@@ -189,7 +189,7 @@
                   ;; when building the cross-compiler.
                   #+sb-xc-host
                   ((member type-spec
-                           '((or fdefn null) (or layout null)
+                           '((or fdefn null)
                              (or alien-type null) (or heap-alien-info null))
                            :test 'equal)
                    `(lambda (x)
@@ -198,7 +198,7 @@
                           x
                           (error "~S is not a ~S" x ',type-spec))))
                   (t
-                   `(lambda (x) (the ,type-spec x))))
+                   `(named-lambda "check-type" (x) (the ,type-spec x))))
            ,validate-function ,default
            ;; Rationale for hardcoding here is explained at INFO-VECTOR-FDEFN.
            ,(or (and (eq category :function) (eq kind :definition)
@@ -315,25 +315,6 @@
         (funcall (truly-the function (cdr hook)) name info-number answer nil))
       (values answer nil))))
 
-;; Perform the approximate equivalent operations of retrieving
-;; (INFO :CATEGORY :KIND NAME), but if no info is found, invoke CREATION-FORM
-;; to produce an object that becomes the value for that piece of info, storing
-;; and returning it. The entire sequence behaves atomically but with a proviso:
-;; the creation form's result may be discarded, and another object returned
-;; instead (presumably) from another thread's execution of the creation form.
-;; If constructing the object has either non-trivial cost, or deleterious
-;; side-effects from making and discarding its result, do NOT use this macro.
-;; A mutex-guarded table would probably be more appropriate in such cases.
-;;
-(def!macro get-info-value-initializing (category kind name creation-form)
-  (with-unique-names (info-number proc)
-    `(let ((,info-number
-            ,(if (and (keywordp category) (keywordp kind))
-                 (meta-info-number (meta-info category kind))
-                 `(meta-info-number (meta-info ,category ,kind)))))
-       (dx-flet ((,proc () ,creation-form))
-         (%get-info-value-initializing ,name ,info-number #',proc)))))
-
 ;; interface to %ATOMIC-SET-INFO-VALUE
 ;; GET-INFO-VALUE-INITIALIZING is a restricted case of this,
 ;; and perhaps could be implemented as such.
@@ -391,6 +372,9 @@
   :default
   #+sb-xc-host nil
   #-sb-xc-host (lambda (name) (if (fboundp name) :function nil)))
+
+;;; Indicates whether the function is deprecated.
+(define-info-type (:function :deprecated) :type-spec deprecation-info)
 
 (declaim (ftype (sfunction (t) ctype)
                 specifier-type ctype-of sb!kernel::ctype-of-array))
@@ -479,6 +463,14 @@
 ;;; structure containing the info used to special-case compilation.
 (define-info-type (:function :info) :type-spec (or fun-info null))
 
+;;; This is a type specifier <t> such that if an argument X to the function
+;;; does not satisfy (TYPEP x <t>) then the function definitely returns NIL.
+;;; When the named function is a predicate that appears in (SATISFIES p)
+;;; specifiers, it is possible for type operations to see into the predicate
+;;; just enough to determine that something like
+;;;   (AND (SATISFIES UNINTERESTING-METHOD-REDEFINITION-P) RATIONAL)
+;;; is *empty-type*, which in turn avoids type cache pollution.
+(define-info-type (:function :predicate-truth-constraint) :type-spec t)
 
 ;;;; ":VARIABLE" subsection - Data pertaining to globally known variables.
 
@@ -493,7 +485,7 @@
 (define-info-type (:variable :always-bound)
   :type-spec (member nil :eventually :always-bound))
 
-(define-info-type (:variable :deprecated) :type-spec t)
+(define-info-type (:variable :deprecated) :type-spec deprecation-info)
 
 ;;; the declared type for this variable
 (define-info-type (:variable :type)
@@ -619,6 +611,27 @@
 ;;; The classoid-cell for this type
 (define-info-type (:type :classoid-cell) :type-spec t)
 
+(defun find-classoid-cell (name &key create)
+  (let ((real-name (uncross name)))
+    (cond ((info :type :classoid-cell real-name))
+          (create
+           (get-info-value-initializing
+            :type :classoid-cell real-name
+            (sb!kernel::make-classoid-cell real-name))))))
+
+;;; Return the classoid with the specified NAME. If ERRORP is false,
+;;; then NIL is returned when no such class exists.
+(defun find-classoid (name &optional (errorp t))
+  (declare (type symbol name))
+  (let ((cell (find-classoid-cell name)))
+    (cond ((and cell (classoid-cell-classoid cell)))
+          (errorp
+           (error 'simple-type-error
+                  :datum nil
+                  :expected-type 'class
+                  :format-control "Class not yet defined: ~S"
+                  :format-arguments (list name))))))
+
 ;;; layout for this type being used by the compiler
 (define-info-type (:type :compiler-layout)
   :type-spec (or layout null)
@@ -631,6 +644,9 @@
 (define-info-type (:type :lambda-list) :type-spec t)
 
 (define-info-type (:type :source-location) :type-spec t)
+
+;;; Indicates whether the function is deprecated.
+(define-info-type (:type :deprecated) :type-spec deprecation-info)
 
 ;;;; ":TYPED-STRUCTURE" subsection.
 ;;;; Data pertaining to structures that used DEFSTRUCT's :TYPE option.
