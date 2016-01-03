@@ -11,6 +11,8 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
+#+interpreter (sb-ext:exit :code 104)
+
 (load "compiler-test-util.lisp")
 (defpackage "CLOS-IMPURE"
   (:use "CL" "ASSERTOID" "TEST-UTIL" "COMPILER-TEST-UTIL"))
@@ -601,6 +603,7 @@
 (defmethod no-next-method-test ((x integer)) (call-next-method))
 (assert (null (ignore-errors (no-next-method-test 1))))
 (defmethod no-next-method ((g (eql #'no-next-method-test)) m &rest args)
+  (declare (ignore args))
   'success)
 (assert (eq (no-next-method-test 1) 'success))
 (assert (null (ignore-errors (no-next-method-test 'foo))))
@@ -914,6 +917,7 @@
   (reinitialize-instance (make-instance 'subclass234) :dummy 0))
 (assert-error (bug-234) program-error)
 (defmethod shared-initialize :after ((i class234) slots &key dummy)
+  (declare (ignore dummy))
   (incf *bug234*))
 (assert (typep (subbug-234) 'subclass234))
 (assert (= *bug234*
@@ -1161,6 +1165,7 @@
 (defclass yet-another-obsoletion-sub (yet-another-obsoletion-super) ())
 (defmethod shared-initialize :after ((i yet-another-obsoletion-super)
                                      slots &rest init)
+  (declare (ignore init))
   (incf (obs-of i)))
 
 (defvar *yao-super* (make-instance 'yet-another-obsoletion-super))
@@ -2124,6 +2129,7 @@
 
 (defmethod initialize-instance :after
     ((class cacheing-initargs-redefinitions-check) &key slot)
+  (declare (ignore slot))
   nil)
 
 (with-test (:name (make-instance :initargs-checking-new-method-initargs))
@@ -2478,4 +2484,9 @@
    (defclass class-with-eventual-self-as-metaclass () ()
      (:metaclass class-with-eventual-self-as-metaclass))))
 
-;;;; success
+(with-test (:name :function-keywords)
+  (defgeneric function-keywords-test (&key))
+  (assert (equal (function-keywords
+                  (defmethod function-keywords-test (&key a b)
+                    (declare (ignore a b))))
+                 '(:a :b))))

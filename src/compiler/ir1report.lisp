@@ -482,7 +482,10 @@ has written, having proved that it is unreachable."))
       (declare (ignore form))
       (let ((*print-level* 2)
             (*print-pretty* nil))
-        (format nil "~{~{~S~^ ~}~^ => ~}"
+        ;; It's arbitrary how this name is stringified.
+        ;; Using ~A in lieu of ~S prevents "SB!" strings from getting in.
+        (format nil
+                "~{~{~A~^ ~}~^ => ~}"
                 #+sb-xc-host (list (list (caar context)))
                 #-sb-xc-host context)))))
 
@@ -541,16 +544,13 @@ has written, having proved that it is unreachable."))
 ;;; WITH-COMPILATION-UNIT, which can potentially be invoked outside
 ;;; the compiler, hence the BOUNDP check.
 (defun note-undefined-reference (name kind)
-  ;; A convenience: in the cross-compiler, assume that any function
-  ;; in any SB! package will eventually be defined.
-  ;; This may be untrue, but is true enough that it correctly muffles
-  ;; far more warnings than it incorrectly muffles (if any).
-  ;; Warnings about failure to inline will still be shown.
   #+sb-xc-host
-  (when (eq kind :function)
-    (let ((package (symbol-package (fun-name-block-name name))))
-      (when (= (mismatch (string (package-name package)) "SB!") 3)
-        (return-from note-undefined-reference (values)))))
+  ;; Whitelist functions are looked up prior to UNCROSS,
+  ;; so that we can distinguish CL:SOMEFUN from SB-XC:SOMEFUN.
+  (when (and (eq kind :function)
+             (gethash name sb-cold::*undefined-fun-whitelist*))
+    (return-from note-undefined-reference (values)))
+  (setq name (uncross name))
   (unless (and
            ;; Check for boundness so we don't blow up if we're called
            ;; when IR1 conversion isn't going on.

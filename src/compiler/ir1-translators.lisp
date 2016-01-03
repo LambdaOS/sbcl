@@ -700,8 +700,7 @@ have been evaluated."
   (cond ((null bindings)
          (ir1-translate-locally body start next result))
         ((listp bindings)
-         (multiple-value-bind (forms decls)
-             (parse-body body :doc-string-allowed nil)
+         (multiple-value-bind (forms decls) (parse-body body nil)
            (multiple-value-bind (vars values) (extract-let-vars bindings 'let)
              (binding* ((ctran (make-ctran))
                         (fun-lvar (make-lvar))
@@ -727,8 +726,7 @@ have been evaluated."
 Similar to LET, but the variables are bound sequentially, allowing each VALUE
 form to reference any of the previous VARS."
   (if (listp bindings)
-      (multiple-value-bind (forms decls)
-          (parse-body body :doc-string-allowed nil)
+      (multiple-value-bind (forms decls) (parse-body body nil)
         (multiple-value-bind (vars values) (extract-let-vars bindings 'let*)
           (processing-decls (decls vars nil next result post-binding-lexenv)
             (ir1-convert-aux-bindings start
@@ -750,7 +748,7 @@ form to reference any of the previous VARS."
 (defun ir1-translate-locally (body start next result &key vars funs)
   (declare (type ctran start next) (type (or lvar null) result)
            (type list body))
-  (multiple-value-bind (forms decls) (parse-body body :doc-string-allowed nil)
+  (multiple-value-bind (forms decls) (parse-body body nil)
     (processing-decls (decls vars funs next result)
       (ir1-convert-progn-body start next result forms))))
 
@@ -785,7 +783,7 @@ also processed as top level forms."
           (program-assert-symbol-home-package-unlocked
            :compile name "binding ~A as a local function"))
         (names name)
-        (multiple-value-bind (forms decls doc) (parse-body (cddr def))
+        (multiple-value-bind (forms decls doc) (parse-body (cddr def) t)
           (defs `(lambda ,(second def)
                    ,@(when doc (list doc))
                    ,@decls
@@ -824,8 +822,7 @@ also processed as top level forms."
 Evaluate the BODY-FORMS with local function definitions. The bindings do
 not enclose the definitions; any use of NAME in the FORMS will refer to the
 lexically apparent function definition in the enclosing environment."
-  (multiple-value-bind (forms decls)
-      (parse-body body :doc-string-allowed nil)
+  (multiple-value-bind (forms decls) (parse-body body nil)
     (unless (listp definitions)
       (compiler-error "Malformed FLET definitions: ~s" definitions))
     (multiple-value-bind (names defs)
@@ -848,7 +845,7 @@ lexically apparent function definition in the enclosing environment."
 Evaluate the BODY-FORMS with local function definitions. The bindings enclose
 the new definitions, so the defined functions can call themselves or each
 other."
-  (multiple-value-bind (forms decls) (parse-body body :doc-string-allowed nil)
+  (multiple-value-bind (forms decls) (parse-body body nil)
     (unless (listp definitions)
       (compiler-error "Malformed LABELS definitions: ~s" definitions))
     (multiple-value-bind (names defs)
@@ -955,6 +952,31 @@ Consequences are undefined if any result is not of the declared type
 care."
   (the-in-policy value-type form **zero-typecheck-policy** start next result))
 
+(def-ir1-translator bound-cast ((array bound index) start next result)
+  (let ((check-bound-tran (make-ctran))
+        (index-ctran (make-ctran))
+        (index-lvar (make-lvar)))
+    ;; CHECK-BOUND transform ensure that INDEX won't be evaluated twice
+    (ir1-convert start check-bound-tran nil `(%check-bound ,array ,bound ,index))
+    (ir1-convert check-bound-tran index-ctran index-lvar index)
+    (let* ((check-bound-combination (ctran-use check-bound-tran))
+           (array (first (combination-args check-bound-combination)))
+           (bound (second (combination-args check-bound-combination)))
+           (derived (constant-lvar-p bound))
+           (type (specifier-type (if derived
+                                     `(integer 0 (,(lvar-value bound)))
+                                     '(and unsigned-byte fixnum))))
+           (cast (make-bound-cast :value index-lvar
+                                  :asserted-type type
+                                  :type-to-check type
+                                  :derived-type (coerce-to-values type)
+                                  :check check-bound-combination
+                                  :derived derived
+                                  :array array
+                                  :bound bound)))
+      (link-node-to-previous-ctran cast index-ctran)
+      (setf (lvar-dest index-lvar) cast)
+      (use-continuation cast next result))))
 #-sb-xc-host
 (setf (info :function :macro-function 'truly-the)
       (lambda (whole env)

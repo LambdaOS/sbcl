@@ -11,9 +11,10 @@
 
 (in-package "SB!IMPL")
 
-(macrolet ((def (name constructor access src-type)
+(macrolet ((def (name constructor access src-type &optional explicit-check)
              `(defun ,name (object type)
                 (declare (type ,src-type object))
+                ,@(when explicit-check `((declare (explicit-check))))
                 (do* ((index 0 (1+ index))
                       (length (length object))
                       (result ,constructor)
@@ -27,31 +28,27 @@
                            (vector '(aref in-object index))
                            (sequence '(elt in-object index))))))))
 
-  (def list-to-vector* (make-sequence type length) aref list)
+  (def list-to-vector* (make-sequence type length) aref list t)
 
-  (def vector-to-vector* (make-sequence type length) aref vector)
+  (def vector-to-vector* (make-sequence type length) aref vector t)
 
   (def sequence-to-vector* (make-sequence type length) aref sequence))
 
 (defun vector-to-list* (object)
   (declare (type vector object))
-  (let ((result (list nil))
-        (length (length object)))
-    (declare (fixnum length))
-    (do ((index 0 (1+ index))
-         (splice result (cdr splice)))
-        ((>= index length) (cdr result))
-      (declare (fixnum index))
-      (rplacd splice (list (aref object index))))))
+  (dx-let ((result (list nil)))
+    (let ((splice result))
+      (do-vector-data (elt object (cdr result))
+        (let ((cell (list elt)))
+          (setf (cdr splice) cell splice cell))))))
 
 (defun sequence-to-list (sequence)
   (declare (type sequence sequence))
-  (let* ((result (list nil))
-         (splice result))
-    (sb!sequence:dosequence (i sequence)
-      (rplacd splice (list i))
-      (setf splice (cdr splice)))
-    (cdr result)))
+  (dx-let ((result (list nil)))
+    (let ((splice result))
+      (sb!sequence:dosequence (elt sequence (cdr result))
+        (let ((cell (list elt)))
+          (setf (cdr splice) cell splice cell))))))
 
 ;;; These are used both by the full DEFUN function and by various
 ;;; optimization transforms in the constant-OUTPUT-TYPE-SPEC case.
@@ -68,11 +65,12 @@
   ;; [Also note, we won't encapsulate a macro or special-form, so this
   ;; introspective technique to decide what kind something is works either way]
   (let ((def (fdefinition symbol)))
-    (acond ((macro/special-guard-fun-p def)
-            (error (if (eq it :special)
-                       "~S names a special operator." "~S names a macro.")
-                   symbol))
-           (t def))))
+    (if (macro/special-guard-fun-p def)
+        (error (ecase (car (%fun-name def))
+                (:macro "~S names a macro.")
+                (:special "~S names a special operator."))
+               symbol)
+        def)))
 
 (defun coerce-to-fun (object)
   ;; (Unlike the other COERCE-TO-FOOs, this one isn't inline, because
@@ -119,6 +117,7 @@
 (defun coerce (object output-type-spec)
   #!+sb-doc
   "Coerce the Object to an object of type Output-Type-Spec."
+  (declare (explicit-check))
   (flet ((coerce-error ()
            (error 'simple-type-error
                   :format-control "~S can't be converted to type ~S."

@@ -33,7 +33,7 @@
 
 (defun allocate-standard-instance (wrapper
                                    &optional (slots-init nil slots-init-p))
-  (let ((instance (%make-standard-instance nil (get-instance-hash-code)))
+  (let ((instance (%make-standard-instance nil 0))
         (no-of-slots (wrapper-no-of-instance-slots wrapper)))
     (setf (std-instance-wrapper instance) wrapper)
     (setf (std-instance-slots instance)
@@ -71,7 +71,7 @@
 (defun allocate-standard-funcallable-instance
     (wrapper &optional (slots-init nil slots-init-p))
   (let ((fin (%make-standard-funcallable-instance
-              nil nil (get-instance-hash-code))))
+              nil (get-instance-hash-code))))
     (set-funcallable-instance-function
      fin
      #'(lambda (&rest args)
@@ -550,6 +550,7 @@
                                        wrapper prototype))))))
 
 (defun class-of (x)
+  (declare (explicit-check))
   (wrapper-class* (layout-of x)))
 
 (defun eval-form (form)
@@ -657,19 +658,6 @@
         (when (and name (symbolp name) (eq name (classoid-name classoid)))
           (setf (find-classoid name) classoid))))))
 
-(defun %set-class-type-translation (class classoid)
-  (when (not (typep classoid 'classoid))
-    (setq classoid (find-classoid classoid nil)))
-  (etypecase classoid
-    (null)
-    (classoid
-     ;; There used to be an AVER preventing the placeholder :INITIALIZING from
-     ;; sneaking into globaldb. It can't any more due to type-safe (SETF INFO).
-     (setf (info :type :translator class)
-           (or (and (typep classoid 'built-in-classoid)
-                    (built-in-classoid-translation classoid))
-               classoid)))))
-
 (!bootstrap-meta-braid)
 (!bootstrap-accessor-definitions t)
 (!bootstrap-accessor-definitions nil)
@@ -699,7 +687,7 @@
             (t
              (setf (find-classoid name) lclass)))
 
-      (%set-class-type-translation class name))))
+      )))
 
 (setq **boot-state** 'braid)
 

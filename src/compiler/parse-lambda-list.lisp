@@ -84,7 +84,14 @@
                (accept (lambda-list-keyword-mask
                         '(&optional &rest &more &key &allow-other-keys &aux)))
                (condition-class 'simple-program-error)
-               silent
+               ;; For internal method functions, just shut up about everything
+               ;; that we could style-warn about. Interpreters tend to scan the
+               ;; lambda list at various inopportune times depending on strategy
+               ;; (macro caching, etc) and it's really annoying to see the
+               ;; &OPTIONAL/&KEY message randomly repeated, especially if it's
+               ;; someone else's code. Fwiw, 'full-eval' muffles warnings during
+               ;; all calls to this parser anyway.
+               (silent (typep list '(cons (eql sb!pcl::.pv.))))
           &aux (seen 0) required optional rest more keys aux env whole tail
                (rest-bits 0))
   (declare (optimize speed))
@@ -108,16 +115,15 @@
                (declare (optimize (sb!c::insert-array-bounds-checks 0)))
                (and (symbolp arg)
                     (let ((name (symbol-name arg)))
-                      (and (typep name 'simple-base-string)
-                           (plusp (length name))
+                      (and (plusp (length name))
                            (char= (char name 0) #\&)))))
              (check-suspicious (kind form)
                (and (probably-ll-keyword-p form)
                     (member form sb!xc:lambda-list-keywords)
                     (report-suspicious kind form)))
              (report-suspicious (kind what)
-               (style-warn "suspicious ~A ~S in lambda list: ~S."
-                           kind what list)
+               (style-warn-once list "suspicious ~A ~S in lambda list: ~S."
+                                kind what list)
                nil) ; Avoid "return convention is not fixed" optimizer note
              (need-arg (state)
                (croak "expecting variable after ~A in: ~S" state list))
@@ -269,8 +275,9 @@
 
       #-sb-xc-host ;; Supress &OPTIONAL + &KEY syle-warning on xc host
       (when (and (logtest (bits &key) seen) optional (not silent))
-        (style-warn
-         "&OPTIONAL and &KEY found in the same lambda list: ~S" list))
+        ;; FIXME: add a condition class for this
+        (style-warn-once
+         list "&OPTIONAL and &KEY found in the same lambda list: ~S" list))
 
       ;; For CONTEXT other than :VALUES-TYPE/:FUNCTION-TYPE we reject
       ;; illegal list elements. Type specifiers have arbitrary shapes,
@@ -902,6 +909,10 @@
     (multiple-value-bind (kind name) (get-ds-bind-context pattern)
       #-sb-xc-host
       (declare (optimize sb!c::allow-non-returning-tail-call))
+      ;; KLUDGE: Compiling (COERCE x 'list) transforms to COERCE-TO-LIST,
+      ;; but COERCE-TO-LIST is an inline function not yet defined, and
+      ;; its subsequent definition would signal an inlining failure warning.
+      (declare (notinline coerce))
       (error 'sb!kernel::defmacro-lambda-list-broken-key-list-error
              :kind kind :name name
              :problem problem
@@ -1053,12 +1064,11 @@
 ;;; The CLtl2 name for this operation is PARSE-MACRO.
 (defun make-macro-lambda
     (lambda-name lambda-list body kind name
-     &key ((:environment envp) t) (doc-string-allowed :internal)
-           (wrap-block name))
+     &key (accessor 'cdr) (doc-string-allowed :internal)
+          ((:environment envp) t) (wrap-block name))
   (declare (type (member t nil :ignore) envp))
   (declare (type (member nil :external :internal) doc-string-allowed))
-  (binding* (((forms decls docstring)
-              (parse-body body :doc-string-allowed doc-string-allowed))
+  (binding* (((forms decls docstring) (parse-body body doc-string-allowed))
              ;; Parse the lambda list, but not recursively.
              ((llks req opt rest keys aux env whole)
               (parse-lambda-list
@@ -1084,26 +1094,28 @@
                       (when whole `((,(car whole) ,ll-whole)))))
              ;; Drop &WHOLE and &ENVIRONMENT
              (new-ll (make-lambda-list llks nil req opt rest keys aux))
-             (parse (parse-ds-lambda-list new-ll))
-             (arg-accessor
-              (if (eq kind 'define-compiler-macro) 'compiler-macro-args 'cdr)))
+             (parse (parse-ds-lambda-list new-ll)))
     ;; Signal a style warning for duplicate names, but disregard &AUX variables
     ;; because most folks agree that (LET* ((X (F)) (X (G X))) ..) makes sense
     ;; - some would even say that it is idiomatic - and &AUX bindings are just
     ;; LET* bindings.
     ;; The obsolete PARSE-DEFMACRO signaled an error, but that seems harsh.
-    ;; Other implementations permit (X &OPTIONAL X), and the fact that
-    ;; nesting is allowed makes this issue even less clear.
+    ;; Other implementations permit (X &OPTIONAL X),
+    ;; and the allowance for nesting makes this issue even less clear.
     (mapl (lambda (tail)
             (when (memq (car tail) (cdr tail))
-              (style-warn "variable ~S occurs more than once" (car tail))))
+              (style-warn-once lambda-list "variable ~S occurs more than once"
+                               (car tail))))
           (append whole env (ds-lambda-list-variables parse nil)))
     (values `(,@(if lambda-name `(named-lambda ,lambda-name) '(lambda))
                   (,ll-whole ,@ll-env ,@(and ll-aux (cons '&aux ll-aux)))
                ,@(when (and docstring (eq doc-string-allowed :internal))
                    (prog1 (list docstring) (setq docstring nil)))
-               ;; Normalize the lambda list by unparsing.
-               (declare (lambda-list ,(unparse-ds-lambda-list parse)))
+               ;; MACROLET doesn't produce an object capable of reflection,
+               ;; so don't bother inserting a different lambda-list.
+               ,@(unless (eq kind 'macrolet)
+                   ;; Normalize the lambda list by unparsing.
+                   `((declare (lambda-list ,(unparse-ds-lambda-list parse)))))
                ,@(if outer-decls (list outer-decls))
                ,@(and (not env) (eq envp t) `((declare (ignore ,@ll-env))))
                ,@(sb!c:macro-policy-decls)
@@ -1112,7 +1124,7 @@
                                            `(:special-form . ,name)
                                            `(:macro ,name . ,kind)))
                       '(destructuring-bind))
-                   ,new-ll (,arg-accessor ,ll-whole)
+                   ,new-ll (,accessor ,ll-whole)
                  ,@decls
                  ,@(if wrap-block
                        `((block ,(fun-name-block-name name) ,@forms))

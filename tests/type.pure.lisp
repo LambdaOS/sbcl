@@ -11,6 +11,10 @@
 
 (in-package "CL-USER")
 
+(test-util:with-test (:name :typexpand-check-lexenv)
+  (flet ((try (f) (assert-error (funcall f 'hash-table 3))))
+    (mapc #'try '(typexpand-1 typexpand typexpand-all))))
+
 (locally
   (declare (notinline mapcar))
   (mapcar (lambda (args)
@@ -537,6 +541,26 @@
     (adjust-array a 20)
     (assert (equal (type-of a) '(vector t 20)))))
 
+
+(with-test (:name :unknown-type-strongly-uncacheable)
+  ;; VALUES-SPECIFIER-TYPE should not cache a specifier any part of which
+  ;; is unknown. This leads to consistent results when parsing unknown
+  ;; types. Previously it was indeterminate whether a condition would
+  ;; be signaled for (OR UNKNOWN KNOWN) depending on whether that expression
+  ;; had ever been parsed and whether it had been evicted from the cache.
+  (assert-signal (progn (sb-kernel:specifier-type '(or weeble ratio))
+                        (sb-kernel:specifier-type '(or weeble ratio)))
+                 sb-kernel:parse-unknown-type 2) ; expect 2 signals
+  (assert-signal (progn (sb-kernel:specifier-type '(and potrzebie real))
+                        (sb-kernel:specifier-type '(and potrzebie real)))
+                 sb-kernel:parse-unknown-type 2) ; expect 2 signals
+  (assert-signal (progn (sb-kernel:specifier-type '(array strudel))
+                        (sb-kernel:specifier-type '(array strudel)))
+                 sb-kernel:parse-unknown-type 2) ; expect 2 signals
+  (assert-signal (progn (sb-kernel:specifier-type '(not bad))
+                        (sb-kernel:specifier-type '(not bad)))
+                 sb-kernel:parse-unknown-type 2)) ; expect 2 signals
+
 (in-package "SB-KERNEL")
 (test-util:with-test (:name :partition-array-into-simple/hairy)
   ;; Some tests that (simple-array | hairy-array) = array
@@ -606,3 +630,12 @@
                (assert err))))
       (expect-lose `(,classoid))
       (expect-lose `(,classoid 1 100)))))
+
+(test-util:with-test (:name :classoid-type-kind)
+  (do-all-symbols (s)
+    (let ((c (sb-kernel:find-classoid s nil)))
+      ;; No classoid can have a :TYPE :KIND that is :DEFINED.
+      (when c
+        (if (typep c 'sb-kernel:built-in-classoid)
+            (assert (eq (sb-int:info :type :kind s) :primitive))
+            (assert (eq (sb-int:info :type :kind s) :instance)))))))

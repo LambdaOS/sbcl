@@ -221,7 +221,7 @@ initial_thread_trampoline(struct thread *th)
 #ifdef LISP_FEATURE_SB_THREAD
     pthread_setspecific(lisp_thread, (void *)1);
 #endif
-#if defined(THREADS_USING_GCSIGNAL) && defined(LISP_FEATURE_PPC)
+#if defined(THREADS_USING_GCSIGNAL) && (defined(LISP_FEATURE_PPC) || defined(LISP_FEATURE_ARM64))
     /* SIG_STOP_FOR_GC defaults to blocked on PPC? */
     unblock_gc_signals(0,0);
 #endif
@@ -439,7 +439,8 @@ undo_init_new_thread(struct thread *th, init_thread_data *scribble)
     gc_assert(lock_ret == 0);
 #endif
 
-    if(th->tls_cookie>=0) arch_os_thread_cleanup(th);
+    arch_os_thread_cleanup(th);
+
 #ifndef LISP_FEATURE_SB_SAFEPOINT
     os_sem_destroy(th->state_sem);
     os_sem_destroy(th->state_not_running_sem);
@@ -745,9 +746,14 @@ create_thread_struct(lispobj initial_function) {
 #else
     th->alien_stack_pointer=((void *)th->alien_stack_start);
 #endif
-#if defined(LISP_FEATURE_X86) || defined (LISP_FEATURE_X86_64) || defined(LISP_FEATURE_SB_THREAD)
+
+#ifdef LISP_FEATURE_SB_THREAD
     th->pseudo_atomic_bits=0;
+#elif defined LISP_FEATURE_GENCGC
+    clear_pseudo_atomic_atomic(th);
+    clear_pseudo_atomic_interrupted(th);
 #endif
+
 #ifdef LISP_FEATURE_GENCGC
     gc_set_region_empty(&th->alloc_region);
 # if defined(LISP_FEATURE_SB_SAFEPOINT_STRICTLY) && !defined(LISP_FEATURE_WIN32)
@@ -777,11 +783,6 @@ create_thread_struct(lispobj initial_function) {
     SetSymbolValue(CONTROL_STACK_END,(lispobj)th->control_stack_end,th);
 #if defined(LISP_FEATURE_X86) || defined (LISP_FEATURE_X86_64)
     SetSymbolValue(ALIEN_STACK_POINTER,(lispobj)th->alien_stack_pointer,th);
-    SetSymbolValue(PSEUDO_ATOMIC_BITS,(lispobj)th->pseudo_atomic_bits,th);
-#endif
-#ifdef PSEUDO_ATOMIC_INTERRUPTED
-    clear_pseudo_atomic_atomic(th);
-    clear_pseudo_atomic_interrupted(th);
 #endif
 #endif
     bind_variable(CURRENT_CATCH_BLOCK,make_fixnum(0),th);

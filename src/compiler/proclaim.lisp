@@ -109,6 +109,10 @@
         (setf (info :variable :always-bound name) info-value)
         (setf (info :variable :kind name) info-value))))
 
+(defun type-proclamation-mismatch-warn (name old new &optional description)
+  (warn 'type-proclamation-mismatch-warning
+        :name name :old old :new new :description description))
+
 (defun proclaim-type (name type type-specifier where-from)
   (unless (symbolp name)
     (error "Cannot proclaim TYPE of a non-symbol: ~S" name))
@@ -123,16 +127,24 @@
     (setf (info :variable :type name) type
           (info :variable :where-from name) where-from)))
 
-(defun proclaim-ftype (name type type-specifier where-from)
+(defun ftype-proclamation-mismatch-warn (name old new &optional description)
+  (warn 'ftype-proclamation-mismatch-warning
+        :name name :old old :new new :description description))
+
+(defun proclaim-ftype (name type-oid type-specifier where-from)
+  (declare (type (or ctype defstruct-description) type-oid))
   (unless (legal-fun-name-p name)
     (error "Cannot declare FTYPE of illegal function name ~S" name))
-  (unless (csubtypep type (specifier-type 'function))
-    (error "Not a function type: ~S" (type-specifier type)))
-
+  (when (and (ctype-p type-oid)
+             (not (csubtypep type-oid (specifier-type 'function))))
+    (error "Not a function type: ~S" (type-specifier type-oid)))
   (with-single-package-locked-error
       (:symbol name "globally declaring the FTYPE of ~A")
     (when (eq (info :function :where-from name) :declared)
-      (let ((old-type (info :function :type name)))
+      (let ((old-type (proclaimed-ftype name))
+            (type (if (ctype-p type-oid)
+                      type-oid
+                      (specifier-type type-specifier))))
         (cond
           ((not (type/= type old-type))) ; not changed
           ((not (info :function :info name)) ; not a known function
@@ -155,7 +167,7 @@
     (note-name-defined name :function)
 
     ;; The actual type declaration.
-    (setf (info :function :type name) type
+    (setf (info :function :type name) type-oid
           (info :function :where-from name) where-from)))
 
 (defun seal-class (class)
@@ -190,9 +202,9 @@
     (error 'simple-type-error
            :datum            state
            :expected-type    'deprecation-state
-           :format-control   "~<In declaration ~S, ~S state is not a ~
+           :format-control   "~@<In declaration ~S, ~S state is not a ~
                               valid deprecation state. Expected one ~
-                              of ~{~A~^, ~}.~@:>"
+                              of ~{~S~^, ~}.~@:>"
            :format-arguments (list form state
                                    (rest (typexpand 'deprecation-state)))))
   (multiple-value-call #'values
@@ -237,7 +249,7 @@
                ((listp id)
                 (let ((id (car id)))
                   (and (symbolp id)
-                       (or (info :type :translator id)
+                       (or (info :type :expander id)
                            (info :type :kind id)))))
                (t
                 ;; FIXME: should be (TYPEP id '(OR CLASS CLASSOID))

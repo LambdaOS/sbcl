@@ -207,8 +207,6 @@
 
 (defgeneric function-keywords (method))
 
-(defgeneric function-keyword-parameters (method))
-
 (defgeneric generic-function-argument-precedence-order (gf))
 
 (defgeneric generic-function-lambda-list (gf))
@@ -242,6 +240,8 @@
 (defgeneric specializer-direct-methods (specializer))
 
 (defgeneric specializer-method-table (specializer))
+
+(defgeneric specializer-method-holder (specializer &optional create))
 
 (defgeneric update-constructors (class))
 

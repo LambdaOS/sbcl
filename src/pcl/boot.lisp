@@ -73,8 +73,8 @@ bootstrapping.
                     add-method remove-method))
 
 (defvar *!early-functions*
-  '((make-a-method early-make-a-method real-make-a-method)
-    (add-named-method early-add-named-method real-add-named-method)))
+  '((make-a-method !early-make-a-method real-make-a-method)
+    (add-named-method !early-add-named-method real-add-named-method)))
 
 ;;; For each of the early functions, arrange to have it point to its
 ;;; early definition. Do this in a way that makes sure that if we
@@ -308,6 +308,16 @@ generic function lambda list ~S~:>"
       (verify-each-atom-or-singleton '&optional optional)
       (verify-each-atom-or-singleton '&key keys))))
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  ;; Kill the existing definition of DEFMETHOD which expands to DEF!METHOD.
+  ;; It's there mainly so that DEFSTRUCT's printer options can expand
+  ;; to DEFMETHOD instead of a DEF!METHOD.
+  (fmakunbound 'defmethod))
+;;; As per CLHS -
+;;; "defmethod is not required to perform any compile-time side effects."
+;;; and we don't do much other than to make the function be defined,
+;;; which means that checking of callers' arglists can only occur after called
+;;; methods are actually loaded.
 (defmacro defmethod (name &rest args)
   (multiple-value-bind (qualifiers lambda-list body)
       (parse-defmethod args)
@@ -402,7 +412,11 @@ generic function lambda list ~S~:>"
                          qualifiers
                          lambda-list
                          body
-                         env)
+                         env
+                         ;; ENV could be of type SB!INTERPRETER:BASIC-ENV
+                         ;; but I don't care to figure out what parts of PCL
+                         ;; would have to change to accept that, so coerce.
+                         &aux (env (sb-kernel:coerce-to-lexenv env)))
   (multiple-value-bind (parameters unspecialized-lambda-list specializers)
       (parse-specialized-lambda-list lambda-list)
     (declare (ignore parameters))
@@ -539,6 +553,7 @@ generic function lambda list ~S~:>"
                                  proto-method
                                  method-function-lambda
                                  initargs
+                                 ;; FIXME: coerce-to-lexenv?
                                  env))))
 
 (defun real-make-method-initargs-form (proto-gf proto-method
@@ -582,7 +597,7 @@ generic function lambda list ~S~:>"
             is not a lambda form."
            method-lambda))
   (multiple-value-bind (real-body declarations documentation)
-      (parse-body (cddr method-lambda))
+      (parse-body (cddr method-lambda) t)
     ;; We have the %METHOD-NAME declaration in the place where we expect it only
     ;; if there is are no non-standard prior MAKE-METHOD-LAMBDA methods -- or
     ;; unless they're fantastically unintrusive.
@@ -691,7 +706,7 @@ generic function lambda list ~S~:>"
             (multiple-value-bind (walked-lambda-body
                                   walked-declarations
                                   walked-documentation)
-                (parse-body (cddr walked-lambda))
+                (parse-body (cddr walked-lambda) t)
               (declare (ignore walked-documentation))
               (when (some #'cdr slots)
                 (let ((slot-name-lists (slot-name-lists-from-slots slots)))
@@ -1648,7 +1663,7 @@ generic function lambda list ~S~:>"
   (multiple-value-bind (llks nrequired noptional keywords keyword-parameters)
       (analyze-lambda-list lambda-list)
     (declare (ignore keyword-parameters))
-    (let* ((old (info :function :type name)) ;FIXME:FDOCUMENTATION instead?
+    (let* ((old (proclaimed-ftype name)) ;FIXME:FDOCUMENTATION instead?
            (old-ftype (if (fun-type-p old) old nil))
            (old-restp (and old-ftype (fun-type-rest old-ftype)))
            (old-keys (and old-ftype
@@ -2059,7 +2074,6 @@ generic function lambda list ~S~:>"
                          'source source-location)
     (!bootstrap-set-slot 'standard-generic-function fin
                          '%documentation documentation)
-    (set-fun-name fin spec)
     (let ((arg-info (make-arg-info)))
       (setf (early-gf-arg-info fin) arg-info)
       (when lambda-list-p
@@ -2200,7 +2214,7 @@ generic function lambda list ~S~:>"
     ;; is a subtype of the old one, though -- even though the type is not
     ;; trusted anymore, the warning is still not quite as interesting.
     (when (and (eq :declared (info :function :where-from fun-name))
-               (not (csubtypep gf-type (setf old-type (info :function :type fun-name)))))
+               (not (csubtypep gf-type (setf old-type (proclaimed-ftype fun-name)))))
       (style-warn "~@<Generic function ~S clobbers an earlier ~S proclamation ~S ~
                    for the same name with ~S.~:@>"
                   fun-name 'ftype
@@ -2288,7 +2302,7 @@ generic function lambda list ~S~:>"
     (declare (list metatypes))
     (length metatypes)))
 
-(defun early-make-a-method (class qualifiers arglist specializers initargs doc
+(defun !early-make-a-method (class qualifiers arglist specializers initargs doc
                             &key slot-name object-class method-class-function
                             definition-source)
   (let ((parsed ())
@@ -2298,10 +2312,8 @@ generic function lambda list ~S~:>"
     ;; got class objects, then we can compute unparsed, but if we got
     ;; class names we don't try to compute parsed.
     ;;
-    ;; Note that the use of not symbolp in this call to every should be
-    ;; read as 'classp' we can't use classp itself because it doesn't
-    ;; exist yet.
-    (if (every (lambda (s) (not (symbolp s))) specializers)
+    (aver (notany #'sb-pcl::eql-specializer-p specializers))
+    (if (every #'classp specializers)
         (setq parsed specializers
               unparsed (mapcar (lambda (s)
                                  (if (eq s t) t (class-name s)))
@@ -2413,7 +2425,7 @@ generic function lambda list ~S~:>"
 (defun (setf early-method-initargs) (new-value early-method)
   (setf (fifth (fifth early-method)) new-value))
 
-(defun early-add-named-method (generic-function-name qualifiers
+(defun !early-add-named-method (generic-function-name qualifiers
                                specializers arglist &rest initargs
                                &key documentation definition-source
                                &allow-other-keys)
@@ -2615,6 +2627,7 @@ generic function lambda list ~S~:>"
        :context 'defmethod
        :accept (lambda-list-keyword-mask
                 '(&optional &rest &key &allow-other-keys &aux))
+       :silent t ; never signal &OPTIONAL + &KEY style-warning
        :condition-class 'specialized-lambda-list-error)
     (let ((required (mapcar (lambda (x) (if (listp x) (car x) x)) specialized)))
       (values (append required

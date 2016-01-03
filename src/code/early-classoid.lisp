@@ -23,17 +23,18 @@
              (:conc-name dd-)
              (:make-load-form-fun just-dump-it-normally)
              #-sb-xc-host (:pure t)
-             (:constructor make-defstruct-description (name)))
+             (:constructor make-defstruct-description (null-lexenv-p name)))
   ;; name of the structure
   (name (missing-arg) :type symbol :read-only t)
   ;; documentation on the structure
   (doc nil :type (or string null))
   ;; prefix for slot names. If NIL, none.
   (conc-name nil :type (or string null))
-  ;; the name of the primary standard keyword constructor, or NIL if none
-  (default-constructor nil :type symbol)
-  ;; all the explicit :CONSTRUCTOR specs, with name defaulted
+  ;; All the :CONSTRUCTOR specs and posssibly an implied constructor,
+  ;; keyword constructors first, then BOA constructors. NIL if none.
   (constructors () :type list)
+  ;; True if the DEFSTRUCT appeared in a null lexical environment.
+  (null-lexenv-p nil :type boolean :read-only t) ; the safe default is NIL
   ;; name of copying function
   (copier-name nil :type symbol)
   ;; name of type predicate
@@ -340,3 +341,6 @@
 ;;; change either.
 (def!struct (static-classoid (:include classoid)
                              (:constructor make-static-classoid)))
+
+(declaim (freeze-type built-in-classoid condition-classoid
+                      standard-classoid static-classoid))
